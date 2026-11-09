@@ -1,6 +1,8 @@
 <div align="center">
 
-# ⚡ U-Ray
+<img src="assets/uray-mark.svg" alt="U-Ray mark" width="92">
+
+<h1>U-Ray</h1>
 
 ### Свой язык программирования — от первых циклов до обучения нейросетей
 
