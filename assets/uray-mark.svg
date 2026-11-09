@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">U-Ray mark</title>
+  <desc id="desc">A luminous U-shaped interpreter path with three neural nodes and a forward ray.</desc>
+  <defs>
+    <linearGradient id="brand" x1="55" y1="205" x2="202" y2="55" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#8B5CF6"/>
+      <stop offset="0.58" stop-color="#5C7CFA"/>
+      <stop offset="1" stop-color="#22D3EE"/>
+    </linearGradient>
+    <radialGradient id="halo" cx="0" cy="0" r="1" gradientTransform="matrix(64 0 0 64 190 61)" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#7C3AED" stop-opacity=".42"/>
+      <stop offset="1" stop-color="#7C3AED" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect x="4" y="4" width="248" height="248" rx="62" fill="#0B1020" stroke="#283453" stroke-width="2"/>
+  <circle cx="190" cy="61" r="64" fill="url(#halo)"/>
+  <path d="M72 56v78c0 43 22 66 56 66s56-23 56-66V56" fill="none" stroke="url(#brand)" stroke-linecap="round" stroke-width="19"/>
+  <path d="m128 157-32-38m32 38 0-56m0 56 32-38" fill="none" stroke="#8B9CC4" stroke-linecap="round" stroke-linejoin="round" stroke-opacity=".88" stroke-width="6"/>
+  <path d="m128 157 44-44" fill="none" stroke="#B7F56A" stroke-linecap="round" stroke-width="5"/>
+  <circle cx="96" cy="119" r="8" fill="#8B5CF6" stroke="#E4D9FF" stroke-width="2"/>
+  <circle cx="128" cy="101" r="8" fill="#22D3EE" stroke="#D8FBFF" stroke-width="2"/>
+  <circle cx="160" cy="119" r="8" fill="#22D3EE" stroke="#D8FBFF" stroke-width="2"/>
+  <circle cx="128" cy="157" r="12" fill="#10182B" stroke="#B7F56A" stroke-width="5"/>
+  <circle cx="174" cy="111" r="7" fill="#B7F56A"/>
+</svg>
