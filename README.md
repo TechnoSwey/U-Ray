@@ -1,47 +1,29 @@
-U-Ray
+<div align="center">
 
-Минимальный интерпретируемый язык программирования с прицелом на машинное обучение.
+<img src="assets/uray-mark.svg" alt="U-Ray mark" width="92">
 
-U-Ray — это:
+<h1>U-Ray</h1>
 
-· полноценный скриптовый язык с функциями, списками, словарями, кортежами и циклами;
-· встроенный ML-модуль nn с dense-слоями, backprop, SGD, Adam и обучением по батчам;
-· ноль обязательных внешних зависимостей — только Python 3.10+ (NumPy и PyPy опциональны для ускорения);
-· предсказуемая семантика, зафиксированная 19 автотестами.
+### Свой язык программирования — от первых циклов до обучения нейросетей
 
-Установка
+Интерпретируемый язык с собственным синтаксисом, понятной семантикой и встроенными инструментами для ML.
 
-```bash
-git clone https://github.com/TechnoSwey/U-Ray.git
-cd U-Ray
-./install.sh
-```
+<p>
+  <a href="https://github.com/TechnoSwey/U-Ray/actions/workflows/ci.yml"><img src="https://github.com/TechnoSwey/U-Ray/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
+  <img src="https://img.shields.io/badge/Python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python 3.10+">
+  <img src="https://img.shields.io/badge/Dependencies-none-16A085?style=flat-square" alt="No required dependencies">
+  <img src="https://img.shields.io/badge/License-MIT-7C3AED?style=flat-square" alt="MIT License">
+</p>
 
-Запуск:
+<a href="#быстрый-старт">Быстрый старт</a> · <a href="#возможности">Возможности</a> · <a href="#примеры">Примеры</a> · <a href="#документация">Документация</a> · <a href="#тесты">Тесты</a>
 
-```bash
-./uray examples/perceptron.ur
-```
+</div>
 
-Или запусти пример прямо из репозитория (без установки):
+---
 
-```bash
-python3 main.py examples/perceptron.ur
-```
+U-Ray — компактный скриптовый язык, в котором можно изучать устройство интерпретатора и экспериментировать с нейросетями без обязательных сторонних библиотек.
 
-Требования: Python 3.10+. Никаких внешних зависимостей (NumPy и PyPy опциональны).
-
-Быстрый старт
-
-Hello, U-Ray
-
-```
-print("привет, U-Ray")
-```
-
-Функции и циклы
-
-```
+```uray
 func factorial(n) {
     if n <= 1 {
         return 1
@@ -54,110 +36,93 @@ for i in range(1, 6) {
 }
 ```
 
-Списки, кортежи и enumerate
+## Быстрый старт
 
-```
-numbers = [10, 20, 30]
-for i, x in enumerate(numbers) {
-    print("индекс", i, "значение", x)
-}
+Нужен Python 3.10 или новее. Обязательные внешние зависимости не требуются.
 
-pair = (1, 2)
-print(pair[0], pair[1])
-```
-
-Строки
-
-```
-s = "Hello, World"
-print(upper(s))             // HELLO, WORLD
-print(split(s, ", "))       // ["Hello", "World"]
-print(join(["a", "b"], "-")) // a-b
+```bash
+git clone https://github.com/TechnoSwey/U-Ray.git
+cd U-Ray
+./install.sh
+./uray examples/save_load.ur
 ```
 
-Модули
+Без установки запускай файл через Python:
 
-```
-import math
-import linalg
-
-print(math.sqrt(2))
-print(linalg.dot([1, 2, 3], [4, 5, 6]))
+```bash
+python3 main.py examples/save_load.ur
 ```
 
-Нейросеть (полный цикл обучения)
+## Возможности
 
+| Язык | Математика | Машинное обучение |
+| --- | --- | --- |
+| Функции, рекурсия, условия и циклы | Встроенные `math` и `linalg` | `nn`: dense-слои, MLP и backprop |
+| Списки, словари, кортежи и строки | Векторы и матричные операции | SGD, Momentum, Adam и обучение по батчам |
+| Предсказуемые правила типов и копирования | Чистый Python — базовый режим | Оценка, сохранение и загрузка моделей |
+
+Ошибки языка сопровождаются позицией в файле. NumPy и PyPy можно подключить отдельно для ускорения.
+
+## От исходника до результата
+
+```mermaid
+flowchart LR
+    A["Файл .ur"] --> B["Лексер<br/>lexer.py"]
+    B --> C["Парсер<br/>parser.py"]
+    C --> D["AST<br/>ast_nodes.py"]
+    D --> E["Интерпретатор<br/>interpreter.py"]
+    E --> F["Модули<br/>math · linalg · nn"]
 ```
+
+## Пример: нейросеть XOR
+
+Создай MLP, обучи на четырёх точках и проверь результат:
+
+```uray
 import nn
 
-// Данные: 2 входа, 1 выход
 X = [[0.0, 0.0], [0.0, 1.0], [1.0, 0.0], [1.0, 1.0]]
-Y = [[0.0], [1.0], [1.0], [0.0]]  // метки — списки!
+Y = [[0.0], [1.0], [1.0], [0.0]]
 
-// Модель 2 -> 4 -> 1
 model = nn.mlp([2, 4, 1], "sigmoid")
-
-// Обучение "в одну строку" с батчами
 history = nn.train(model, X, Y, epochs=2000, lr=0.5, batch_size=4, loss="mse", optimizer="sgd")
-
-// Оценка
 metrics = nn.evaluate(model, X, Y, "mse")
 print("loss:", metrics[0])
 print("accuracy:", metrics[1])
-
-// Сохранение
-nn.save(model, "xor_model.json")
 ```
 
-Документация
+## Примеры
 
-· Язык — синтаксис, типы, операторы, семантика
-· ML-модуль — nn, linalg, math, рецепты, nn.train
-· Архитектура — как устроен интерпретатор, как расширять
-· Тесты — как писать и запускать
+В репозитории сейчас два запускаемых ML-примера:
 
-Примеры
+| Программа | Что показывает |
+| --- | --- |
+| [`save_load.ur`](examples/save_load.ur) | Обучение XOR, сохранение модели в JSON и загрузка для предсказаний |
+| [`train_batch_example.ur`](examples/train_batch_example.ur) | Синтетические данные, MLP и пакетное обучение с Adam |
 
-Файл Что показывает
-examples/perceptron.ur Линейный классификатор (ручное обновление весов)
-examples/mlp_xor.ur XOR через ручной backprop
-examples/mlp_api.ur XOR через nn.mlp + nn.forward_mlp
-examples/spirals.ur Нелинейная задача (спирали) с Adam
-examples/multiclass.ur 3 класса, softmax, Adam
-examples/train_batch_example.ur Обучение с батчами (nn.train)
-examples/save_load.ur Сохранение и загрузка модели в JSON
+[Каталог примеров и команды запуска →](examples/README.md)
 
-Философия
+## Документация
 
-1. Предсказуемость. Одинаковые вещи работают одинаково везде. == — всегда deep_equal. copy — всегда поверхностная. Слой — всегда словарь {"W": ..., "b": ...}.
-2. Понятные ошибки. Не KeyError из Python, а Ключ 'b' не найден в 3:5.
-3. Ноль обязательных зависимостей. Работает на голом Python. NumPy и PyPy — опциональны (см. ниже).
-4. Расширяемость. Добавить nn-примитив — это 10 строк в modules.py, а не переписывание пол-интерпретатора.
+| Раздел | Содержание |
+| --- | --- |
+| [Язык](docs/LANGUAGE.md) | Синтаксис, типы, операторы, функции и семантика |
+| [ML-модуль](docs/ML.md) | `math`, `linalg`, `nn`, оптимизаторы и рецепты обучения |
+| [Архитектура](docs/ARCHITECTURE.md) | Устройство интерпретатора и точки расширения |
 
-Ускорение (NumPy и PyPy)
-
-U-Ray работает без зависимостей, но использует ускорение, если оно есть:
-
-· NumPy (pip install numpy или pkg install python-numpy): nn.forward, nn.train и linalg используют np.matmul (в 5–10 раз быстрее на больших матрицах).
-· PyPy (pkg install pypy3): скрипт ./uray автоматически запускает через JIT-компилятор (в 5–15 раз быстрее Python-циклов).
-· Если ни того, ни другого нет — работает чистый Python (медленнее, но без зависимостей).
-
-Тесты и CI
-
-https://github.com/TechnoSwey/uray/actions/workflows/ci.yml/badge.svg
-
-Проект использует GitHub Actions для автоматического прогона тестов. Локально все тесты запускаются так:
+## Тесты
 
 ```bash
-./run_tests.sh
+./run_tests.sh        # полный набор
+./run_tests.sh --fast # быстрый набор без ml_*
 ```
 
-Быстрые тесты (без обучения моделей):
+Каждый push проверяется GitHub Actions — [последний запуск CI](https://github.com/TechnoSwey/U-Ray/actions/workflows/ci.yml).
 
-```bash
-./run_tests.sh --fast
-```
+## Лицензия
 
-Лицензия
+[MIT](LICENSE).
 
-MIT.
+<div align="center">
+  <sub>Сделано, чтобы разбирать язык по слоям — и проверять идеи на практике.</sub>
+</div>
