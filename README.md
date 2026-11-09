@@ -42,13 +42,13 @@ for i in range(1, 6) {
 git clone https://github.com/TechnoSwey/U-Ray.git
 cd U-Ray
 ./install.sh
-./uray examples/mlp_api.ur
+./uray examples/save_load.ur
 ```
 
 Без установки запускай файл через Python:
 
 ```bash
-python3 main.py examples/mlp_api.ur
+python3 main.py examples/save_load.ur
 ```
 
 ## Возможности
@@ -91,17 +91,14 @@ print("accuracy:", metrics[1])
 
 ## Примеры
 
+В репозитории сейчас два запускаемых ML-примера:
+
 | Программа | Что показывает |
 | --- | --- |
-| [`perceptron.ur`](examples/perceptron.ur) | Линейный классификатор и обновление весов |
-| [`mlp_xor.ur`](examples/mlp_xor.ur) | XOR и ручной backprop |
-| [`mlp_api.ur`](examples/mlp_api.ur) | MLP через высокоуровневый API |
-| [`spirals.ur`](examples/spirals.ur) | Нелинейная задача и Adam |
-| [`multiclass.ur`](examples/multiclass.ur) | Классификация трёх классов с softmax |
-| [`save_load.ur`](examples/save_load.ur) | Сохранение модели в JSON и загрузка |
-| [`train_batch_example.ur`](examples/train_batch_example.ur) | Обучение с батчами |
+| [`save_load.ur`](examples/save_load.ur) | Обучение XOR, сохранение модели в JSON и загрузка для предсказаний |
+| [`train_batch_example.ur`](examples/train_batch_example.ur) | Синтетические данные, MLP и пакетное обучение с Adam |
 
-[Все примеры и пояснения →](examples/README.md)
+[Каталог примеров и команды запуска →](examples/README.md)
 
 ## Документация
 
