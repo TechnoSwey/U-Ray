@@ -12,8 +12,9 @@ U-Ray — это:
 Установка
 
 ```bash
-git clone https://github.com/TechnoSwey/uray.git
-cd uray
+git clone https://github.com/TechnoSwey/U-Ray.git
+cd U-Ray
+./install.sh
 ```
 
 Запуск:
@@ -22,11 +23,13 @@ cd uray
 ./uray examples/perceptron.ur
 ```
 
-Или без скрипта:
+Или запусти пример прямо из репозитория (без установки):
 
 ```bash
 python3 main.py examples/perceptron.ur
 ```
+
+Требования: Python 3.10+. Никаких внешних зависимостей (NumPy и PyPy опциональны).
 
 Быстрый старт
 
