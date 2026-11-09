@@ -12,7 +12,7 @@ U-Ray — это:
 Установка
 
 ```bash
-git clone https://github.com/Analiter/uray.git
+git clone https://github.com/TechnoSwey/uray.git
 cd uray
 ```
 
