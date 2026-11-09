@@ -81,7 +81,7 @@
     <rect x="265" y="460" width="206" height="42" rx="21" fill="#171D33" stroke="#3A4566"/>
     <circle cx="286" cy="481" r="4" fill="#22D3EE"/>
     <text x="300" y="486" fill="#DDE5FA">БЕЗ ЗАВИСИМОСТЕЙ</text>
-    <rect x="484" y="460" width="129" height="42" rx="21" fill="#171D33" stroke="#3A4566"/>
+    <rect x="484" y="460" width="170" height="42" rx="21" fill="#171D33" stroke="#3A4566"/>
     <circle cx="505" cy="481" r="4" fill="#A78BFA"/>
     <text x="519" y="486" fill="#DDE5FA">ML-МОДУЛЬ NN</text>
   </g>
