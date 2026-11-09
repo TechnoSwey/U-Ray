@@ -1,0 +1,94 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-labelledby="title desc">
+  <title id="title">U-Ray — свой язык. Свои нейросети.</title>
+  <desc id="desc">Social preview for U-Ray, an interpreted programming language with built-in machine-learning tools.</desc>
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1280" y2="640" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#090D1A"/>
+      <stop offset=".58" stop-color="#10152A"/>
+      <stop offset="1" stop-color="#0B1224"/>
+    </linearGradient>
+    <linearGradient id="brand" x1="90" y1="335" x2="1180" y2="190" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#A78BFA"/>
+      <stop offset=".5" stop-color="#7289FF"/>
+      <stop offset="1" stop-color="#47E1E9"/>
+    </linearGradient>
+    <linearGradient id="ray" x1="950" y1="365" x2="1130" y2="175" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#8B5CF6"/>
+      <stop offset=".58" stop-color="#5C7CFA"/>
+      <stop offset="1" stop-color="#22D3EE"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#C3FF72"/>
+      <stop offset="1" stop-color="#72F2C4"/>
+    </linearGradient>
+    <radialGradient id="purpleGlow" cx="0" cy="0" r="1" gradientTransform="matrix(420 0 0 290 1000 225)" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#6D3DCE" stop-opacity=".34"/>
+      <stop offset="1" stop-color="#6D3DCE" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="cyanGlow" cx="0" cy="0" r="1" gradientTransform="matrix(290 0 0 210 1110 400)" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#12B8C5" stop-opacity=".2"/>
+      <stop offset="1" stop-color="#12B8C5" stop-opacity="0"/>
+    </radialGradient>
+    <pattern id="grid" width="48" height="48" patternUnits="userSpaceOnUse">
+      <path d="M48 0H0v48" fill="none" stroke="#A8B5E2" stroke-opacity=".055" stroke-width="1"/>
+    </pattern>
+    <filter id="softGlow" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="12"/>
+    </filter>
+  </defs>
+  <rect width="1280" height="640" rx="32" fill="url(#background)"/>
+  <rect width="1280" height="640" rx="32" fill="url(#grid)"/>
+  <rect width="1280" height="640" rx="32" fill="url(#purpleGlow)"/>
+  <rect width="1280" height="640" rx="32" fill="url(#cyanGlow)"/>
+  <path d="M0 1h1280" stroke="url(#brand)" stroke-opacity=".7" stroke-width="2"/>
+  <path d="M770 0c150 85 220 150 510 128M825 0c150 98 227 182 455 178M914 0c126 109 208 203 366 235" fill="none" stroke="#A9B9F2" stroke-opacity=".1" stroke-width="1.5"/>
+  <circle cx="1042" cy="269" r="214" fill="none" stroke="#A4B3E9" stroke-opacity=".1" stroke-width="1.5"/>
+  <circle cx="1042" cy="269" r="166" fill="none" stroke="#9BAFE8" stroke-opacity=".12" stroke-width="1.5" stroke-dasharray="4 12"/>
+  <circle cx="1042" cy="269" r="124" fill="none" stroke="#52648E" stroke-opacity=".3" stroke-width="1"/>
+  <g fill="none" stroke-linecap="round">
+    <path d="m850 272 89-52 95 47 92-88M939 220l13 105 82-58 34 99M1034 267l92 85" stroke="#8EA4E1" stroke-opacity=".5" stroke-width="2"/>
+    <path d="m850 272 89-52 95 47 92-88" stroke="url(#brand)" stroke-opacity=".58" stroke-width="2"/>
+  </g>
+  <g>
+    <circle cx="850" cy="272" r="7" fill="#A78BFA"/>
+    <circle cx="939" cy="220" r="9" fill="#8B5CF6"/>
+    <circle cx="1034" cy="267" r="12" fill="#22D3EE"/>
+    <circle cx="1126" cy="179" r="8" fill="#B7F56A"/>
+    <circle cx="952" cy="325" r="6" fill="#22D3EE"/>
+    <circle cx="1068" cy="366" r="7" fill="#A78BFA"/>
+    <circle cx="1126" cy="352" r="9" fill="#22D3EE"/>
+  </g>
+  <circle cx="1034" cy="267" r="35" fill="#22D3EE" fill-opacity=".15" filter="url(#softGlow)"/>
+  <g transform="translate(943 170) scale(.72)">
+    <rect x="4" y="4" width="248" height="248" rx="62" fill="#0B1020" fill-opacity=".94" stroke="#405078" stroke-width="3"/>
+    <path d="M72 56v78c0 43 22 66 56 66s56-23 56-66V56" fill="none" stroke="url(#ray)" stroke-linecap="round" stroke-width="19"/>
+    <path d="m128 157-32-38m32 38 0-56m0 56 32-38m-32 38 44-44" fill="none" stroke="#9AADD8" stroke-linecap="round" stroke-linejoin="round" stroke-width="6"/>
+    <path d="m128 157 44-44" fill="none" stroke="#B7F56A" stroke-linecap="round" stroke-width="5"/>
+    <circle cx="96" cy="119" r="8" fill="#8B5CF6" stroke="#E4D9FF" stroke-width="2"/>
+    <circle cx="128" cy="101" r="8" fill="#22D3EE" stroke="#D8FBFF" stroke-width="2"/>
+    <circle cx="160" cy="119" r="8" fill="#22D3EE" stroke="#D8FBFF" stroke-width="2"/>
+    <circle cx="128" cy="157" r="12" fill="#10182B" stroke="#B7F56A" stroke-width="5"/>
+    <circle cx="174" cy="111" r="7" fill="#B7F56A"/>
+  </g>
+  <text x="98" y="146" fill="#A8B5D9" font-family="DejaVu Sans, sans-serif" font-size="17" font-weight="700" letter-spacing="3.2">ИНТЕРПРЕТАТОР  ·  ML  ·  PYTHON</text>
+  <text x="91" y="300" fill="#F8FAFF" font-family="DejaVu Sans, sans-serif" font-size="112" font-weight="700" letter-spacing="-5">U-Ray</text>
+  <text x="100" y="359" fill="url(#brand)" font-family="DejaVu Sans, sans-serif" font-size="32" font-weight="700">Свой язык. Свои нейросети.</text>
+  <text x="102" y="405" fill="#AAB5D1" font-family="DejaVu Sans, sans-serif" font-size="19">Экспериментируй с языком и машинным обучением.</text>
+  <g font-family="DejaVu Sans, sans-serif" font-size="13" font-weight="700" letter-spacing=".8">
+    <rect x="100" y="460" width="152" height="42" rx="21" fill="#171D33" stroke="#3A4566"/>
+    <circle cx="120" cy="481" r="4" fill="#B7F56A"/>
+    <text x="134" y="486" fill="#DDE5FA">PYTHON 3.10+</text>
+    <rect x="265" y="460" width="206" height="42" rx="21" fill="#171D33" stroke="#3A4566"/>
+    <circle cx="286" cy="481" r="4" fill="#22D3EE"/>
+    <text x="300" y="486" fill="#DDE5FA">БЕЗ ЗАВИСИМОСТЕЙ</text>
+    <rect x="484" y="460" width="129" height="42" rx="21" fill="#171D33" stroke="#3A4566"/>
+    <circle cx="505" cy="481" r="4" fill="#A78BFA"/>
+    <text x="519" y="486" fill="#DDE5FA">ML-МОДУЛЬ NN</text>
+  </g>
+  <g transform="translate(752 532)">
+    <path d="M0 0h429" stroke="#7F8DB4" stroke-opacity=".28"/>
+    <text x="0" y="34" fill="#8391B4" font-family="DejaVu Sans Mono, monospace" font-size="13">func idea() {  ...  }</text>
+    <text x="229" y="34" fill="#8391B4" font-family="DejaVu Sans Mono, monospace" font-size="13">nn.train(model, data)</text>
+  </g>
+  <rect x="1" y="1" width="1278" height="638" rx="31" fill="none" stroke="#8795BD" stroke-opacity=".18" stroke-width="2"/>
+</svg>
