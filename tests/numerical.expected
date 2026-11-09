@@ -1,0 +1,10 @@
+softmax large: [0.5, 0.5]
+softmax sum: 1.0
+softmax huge: [1.0, 0.0]
+bce(1, 0): true
+bce(0, 1): true
+bce(0.5, 0.5): true
+cce edge > 0: true
+sigmoid(1000): 1.0
+sigmoid(-1000): 0.0
+adam zero grad W finite: true

@@ -1,0 +1,3 @@
+#!/bin/bash
+# U-Ray: запуск .ur-файла
+exec python3 "$HOME/uray/main.py" "$@"

@@ -1,0 +1,4 @@
+roundtrip equal: true
+W equal: true
+act: leaky_relu
+out_act: sigmoid

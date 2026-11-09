@@ -1,0 +1,11 @@
+s = "Hello, World"
+print(len(s))
+print(upper(s))
+print(lower(s))
+print(split(s, ", "))
+print(strip("  hi  "))
+print(replace(s, "World", "U-Ray"))
+print(join(["a", "b", "c"], "-"))
+print(find(s, "World"))
+print(find(s, "xyz"))
+print(slice(s, 0, 5))
