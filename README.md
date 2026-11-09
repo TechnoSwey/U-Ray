@@ -141,7 +141,7 @@ U-Ray работает без зависимостей, но используе�
 
 Тесты и CI
 
-https://github.com/Analiter/uray/actions/workflows/ci.yml/badge.svg
+https://github.com/TechnoSwey/uray/actions/workflows/ci.yml/badge.svg
 
 Проект использует GitHub Actions для автоматического прогона тестов. Локально все тесты запускаются так:
 
