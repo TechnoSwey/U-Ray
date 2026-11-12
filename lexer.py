@@ -19,6 +19,7 @@ RBRACKET = "RBRACKET"
 LBRACE = "LBRACE"
 RBRACE = "RBRACE"
 COLON  = "COLON"
+SEMICOLON = "SEMICOLON"
 PRINT  = "PRINT"
 EOF    = "EOF"
 
@@ -39,6 +40,13 @@ FUNC   = "FUNC"
 RETURN = "RETURN"
 IMPORT = "IMPORT"
 DEL    = "DEL"
+TRY    = "TRY"
+CATCH  = "CATCH"
+THROW  = "THROW"
+MATCH  = "MATCH"
+UNDERSCORE = "UNDERSCORE"
+TYPE   = "TYPE"
+
 COMMA  = "COMMA"
 DOT    = "DOT"
 TRUE   = "TRUE"
@@ -57,8 +65,13 @@ KEYWORDS = {
     "return": RETURN,
     "import": IMPORT,
     "del": DEL,
+    "try": TRY,
+    "catch": CATCH,
+    "throw": THROW,
+    "match": MATCH,
     "true": TRUE,
     "false": FALSE,
+    "type": TYPE,
 }
 
 
@@ -169,6 +182,8 @@ class Lexer:
                 self.advance(); tokens.append(Token(RBRACE, "}", line, col)); continue
             if ch == ":":
                 self.advance(); tokens.append(Token(COLON, ":", line, col)); continue
+            if ch == ";":
+                self.advance(); tokens.append(Token(SEMICOLON, ";", line, col)); continue
             if ch == ",":
                 self.advance(); tokens.append(Token(COMMA, ",", line, col)); continue
             if ch == ".":
@@ -184,14 +199,12 @@ class Lexer:
         start = self.pos
         while self.peek().isdigit():
             self.advance()
-
         is_float = False
         if self.peek() == "." and self.peek(1).isdigit():
             is_float = True
             self.advance()
             while self.peek().isdigit():
                 self.advance()
-
         text = self.src[start:self.pos]
         if is_float:
             return Token(NUMBER, float(text), line, col)
@@ -203,6 +216,8 @@ class Lexer:
         while self.peek().isalnum() or self.peek() == "_":
             self.advance()
         text = self.src[start:self.pos]
+        if text == "_":
+            return Token(UNDERSCORE, "_", line, col)
         if text in KEYWORDS:
             return Token(KEYWORDS[text], text, line, col)
         return Token(IDENT, text, line, col)
@@ -223,24 +238,16 @@ class Lexer:
                 if self.pos >= len(self.src):
                     raise LexerError(f"Незакрытая строка, начатая в {line}:{col}")
                 esc = self.peek()
-                if esc == "n":
-                    buf.append("\n")
-                elif esc == "t":
-                    buf.append("\t")
-                elif esc == '"':
-                    buf.append('"')
-                elif esc == "\\":
-                    buf.append("\\")
+                if esc == "n": buf.append("\n")
+                elif esc == "t": buf.append("\t")
+                elif esc == '"': buf.append('"')
+                elif esc == "\\": buf.append("\\")
                 else:
-                    raise LexerError(
-                        f"Неизвестная escape-последовательность \\{esc} в {self.line}:{self.col}"
-                    )
+                    raise LexerError(f"Неизвестная escape-последовательность \\{esc} в {self.line}:{self.col}")
                 self.advance()
                 continue
             if ch == "\n":
-                raise LexerError(
-                    f"Перевод строки внутри строки в {self.line}:{self.col}"
-                )
+                raise LexerError(f"Перевод строки внутри строки в {self.line}:{self.col}")
             buf.append(ch)
             self.advance()
         return Token(STRING, "".join(buf), line, col)

@@ -3,7 +3,7 @@
 import os
 
 from errors import RuntimeErrorUray
-
+from tensor import Tensor
 
 URAY_BASE_DIR = os.getcwd()
 
@@ -88,20 +88,38 @@ class Function:
         self.decl = decl
 
 
+class LambdaFunc:
+    def __init__(self, node):
+        self.node = node
+
+
+class StructInstance:
+    def __init__(self, type_name, fields, methods):
+        self.type_name = type_name
+        self.fields = fields
+        self.methods = methods
+
+    def __repr__(self):
+        return f"<struct {self.type_name} {self.fields}>"
+
+
 def deep_equal(a, b, seen=None):
     if seen is None:
         seen = set()
 
-    a_is_container = isinstance(a, (list, DictValue, tuple))
-    b_is_container = isinstance(b, (list, DictValue, tuple))
+    if isinstance(a, Tensor) or isinstance(b, Tensor):
+        if not isinstance(a, Tensor) or not isinstance(b, Tensor):
+            return False
+        return a.data == b.data
+
+    a_is_container = isinstance(a, (list, DictValue, tuple, StructInstance))
+    b_is_container = isinstance(b, (list, DictValue, tuple, StructInstance))
     if not a_is_container and not b_is_container:
         if isinstance(a, bool) != isinstance(b, bool):
             return False
         return a == b
     if a_is_container != b_is_container:
         return False
-
-    # list vs DictValue vs tuple — разные типы
     if type(a) != type(b):
         return False
 
@@ -110,11 +128,14 @@ def deep_equal(a, b, seen=None):
         return a is b
     seen.add(pair)
     try:
+        if isinstance(a, StructInstance):
+            if a.type_name != b.type_name:
+                return False
+            return deep_equal(a.fields, b.fields, seen)
         if isinstance(a, (tuple, list)):
             if len(a) != len(b):
                 return False
             return all(deep_equal(x, y, seen) for x, y in zip(a, b))
-        # DictValue
         if len(a) != len(b):
             return False
         for k in a.keys():
@@ -150,6 +171,10 @@ def _format_repr_impl(v, seen, depth):
         if v.is_integer():
             return f"{v:.1f}"
         return repr(v)
+    if isinstance(v, Tensor):
+        return repr(v)
+    if isinstance(v, StructInstance):
+        return f"<struct {v.type_name} {_format_repr_impl(v.fields, seen, depth + 1)}>"
     if isinstance(v, (list, DictValue, tuple)):
         vid = id(v)
         if vid in seen:
@@ -181,6 +206,8 @@ def _format_repr_impl(v, seen, depth):
         return f"<module {v.name}>"
     if isinstance(v, Function):
         return f"<function {v.decl.name}>"
+    if isinstance(v, LambdaFunc):
+        return "<lambda>"
     if isinstance(v, str):
         return '"' + _escape_string(v) + '"'
     return str(v)

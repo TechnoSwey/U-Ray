@@ -4,14 +4,16 @@ from errors import ParseError
 from lexer import (
     tokenize, NUMBER, STRING, IDENT, ASSIGN, PLUS, MINUS,
     STAR, SLASH, PERCENT, POW, LPAREN, RPAREN, LBRACKET, RBRACKET,
-    LBRACE, RBRACE, COLON, PRINT, EOF,
+    LBRACE, RBRACE, COLON, SEMICOLON, PRINT, EOF,
     EQ, NEQ, LT, GT, LE, GE, IF, ELSE, WHILE, FOR, IN, BREAK, CONTINUE,
-    FUNC, RETURN, IMPORT, DEL, COMMA, DOT, TRUE, FALSE
+    FUNC, RETURN, IMPORT, DEL, COMMA, DOT, TRUE, FALSE,
+    TRY, CATCH, THROW, MATCH, UNDERSCORE, TYPE
 )
 from ast_nodes import (
     Program, Import, Assign, Del, Print, Number, Str, Var, BinOp,
-    If, While, For, Break, Continue, FuncDecl, Return, Block, Bool, Call,
-    ListLit, DictLit, Index, Attr, UnaryOp, TupleLit
+    If, While, For, Break, Continue, FuncDecl, MethodDecl, Return, Block, Bool, Call,
+    ListLit, DictLit, Index, Attr, UnaryOp, TupleLit,
+    Try, Throw, Match, TypeDecl, Slice, Lambda, Ternary
 )
 
 
@@ -20,6 +22,7 @@ class Parser:
         self.tokens = tokens
         self.pos = 0
         self.loop_depth = 0
+        self.no_ternary = 0
 
     def peek(self):
         return self.tokens[self.pos]
@@ -68,6 +71,14 @@ class Parser:
             return self.parse_import()
         if self.check(DEL):
             return self.parse_del()
+        if self.check(TRY):
+            return self.parse_try()
+        if self.check(THROW):
+            return self.parse_throw()
+        if self.check(MATCH):
+            return self.parse_match()
+        if self.check(TYPE):
+            return self.parse_type()
         if self.check(IDENT):
             left = self.parse_factor()
             if self.check(ASSIGN):
@@ -86,6 +97,68 @@ class Parser:
         if not isinstance(target, Index):
             raise ParseError("del работает только с d[key] или a[index]")
         return Del(target)
+
+    def parse_try(self):
+        self.expect(TRY)
+        try_block = self.parse_block()
+        self.expect(CATCH)
+        catch_var = self.expect(IDENT).value
+        catch_block = self.parse_block()
+        return Try(try_block, catch_var, catch_block)
+
+    def parse_throw(self):
+        self.expect(THROW)
+        value = self.parse_expr()
+        return Throw(value)
+
+    def parse_match(self):
+        self.expect(MATCH)
+        expr = self.parse_expr()
+        self.expect(LBRACE)
+        cases = []
+        default_block = None
+        while not self.check(RBRACE):
+            if self.check(UNDERSCORE):
+                self.advance()
+                default_block = self.parse_block()
+            else:
+                pattern = self.parse_expr()
+                block = self.parse_block()
+                cases.append((pattern, block))
+        self.expect(RBRACE)
+        node = Match(expr, cases)
+        node.default_block = default_block
+        return node
+
+    def parse_type(self):
+        self.expect(TYPE)
+        name = self.expect(IDENT).value
+        self.expect(LBRACE)
+        fields = []
+        methods = []
+        while not self.check(RBRACE):
+            if self.check(FUNC):
+                self.advance()
+                mname = self.expect(IDENT).value
+                self.expect(LPAREN)
+                params = []
+                if not self.check(RPAREN):
+                    params.append(self.expect(IDENT).value)
+                    while self.check(COMMA):
+                        self.advance()
+                        params.append(self.expect(IDENT).value)
+                self.expect(RPAREN)
+                saved_depth = self.loop_depth
+                self.loop_depth = 0
+                try:
+                    body = self.parse_block()
+                finally:
+                    self.loop_depth = saved_depth
+                methods.append(MethodDecl(mname, params, body))
+            else:
+                fields.append(self.expect(IDENT).value)
+        self.expect(RBRACE)
+        return TypeDecl(name, fields, methods)
 
     def parse_import(self):
         self.expect(IMPORT)
@@ -109,7 +182,11 @@ class Parser:
 
     def parse_if(self):
         self.expect(IF)
-        cond = self.parse_expr()
+        self.no_ternary += 1
+        try:
+            cond = self.parse_expr()
+        finally:
+            self.no_ternary -= 1
         then_block = self.parse_block()
         else_block = None
         if self.check(ELSE):
@@ -119,7 +196,11 @@ class Parser:
 
     def parse_while(self):
         self.expect(WHILE)
-        cond = self.parse_expr()
+        self.no_ternary += 1
+        try:
+            cond = self.parse_expr()
+        finally:
+            self.no_ternary -= 1
         self.loop_depth += 1
         try:
             body = self.parse_block()
@@ -129,6 +210,34 @@ class Parser:
 
     def parse_for(self):
         self.expect(FOR)
+        # C-style for (for i = 0; i < 5; i = i + 1)
+        if self.check(IDENT) and self.pos + 1 < len(self.tokens) and self.tokens[self.pos + 1].type == ASSIGN:
+            var = self.expect(IDENT).value
+            self.expect(ASSIGN)
+            start_val = self.parse_expr()
+            start = Assign(Var(var), start_val)
+            self.expect(SEMICOLON)
+            
+            self.no_ternary += 1
+            try:
+                cond = self.parse_expr()
+            finally:
+                self.no_ternary -= 1
+            self.expect(SEMICOLON)
+            
+            step_target = self.expect(IDENT).value
+            self.expect(ASSIGN)
+            step_val = self.parse_expr()
+            step = Assign(Var(step_target), step_val)
+            
+            self.loop_depth += 1
+            try:
+                body = self.parse_block()
+            finally:
+                self.loop_depth -= 1
+            return For(var, cond, body=body, start=start, step=step)
+
+        # Обычный for in
         first_var = self.expect(IDENT).value
         unpack_vars = None
         if self.check(COMMA):
@@ -178,6 +287,19 @@ class Parser:
             self.loop_depth = saved_depth
         return FuncDecl(name, params, body)
 
+    def parse_lambda(self):
+        self.expect(FUNC)
+        self.expect(LPAREN)
+        params = []
+        if not self.check(RPAREN):
+            params.append(self.expect(IDENT).value)
+            while self.check(COMMA):
+                self.advance()
+                params.append(self.expect(IDENT).value)
+        self.expect(RPAREN)
+        body = self.parse_block()
+        return Lambda(params, body)
+
     def parse_return(self):
         self.expect(RETURN)
         if self.check(RBRACE) or self.check(EOF):
@@ -200,6 +322,21 @@ class Parser:
             op = self.advance().value
             right = self.parse_additive()
             left = BinOp(op, left, right)
+
+        if self.check(SEMICOLON):
+            return left
+
+        # Тернарный оператор (только если на той же строке)
+        if self.check(IF) and self.no_ternary == 0:
+            prev_tok = self.tokens[self.pos - 1]
+            if_tok = self.peek()
+            if if_tok.line == prev_tok.line:
+                self.advance()
+                cond = self.parse_expr()
+                self.expect(ELSE)
+                false_val = self.parse_expr()
+                return Ternary(cond, left, false_val)
+        
         return left
 
     def parse_additive(self):
@@ -243,9 +380,36 @@ class Parser:
                 continue
             if self.check(LBRACKET):
                 self.advance()
-                index = self.parse_expr()
+                if self.check(COLON):
+                    self.advance()
+                    end = None
+                    if not self.check(RBRACKET):
+                        end = self.parse_expr()
+                    self.expect(RBRACKET)
+                    node = Index(node, Slice(None, end))
+                    continue
+                
+                start = self.parse_expr()
+                if self.check(COLON):
+                    self.advance()
+                    end = None
+                    if not self.check(RBRACKET):
+                        end = self.parse_expr()
+                    self.expect(RBRACKET)
+                    node = Index(node, Slice(start, end))
+                    continue
+                
+                if self.check(COMMA):
+                    items = [start]
+                    while self.check(COMMA):
+                        self.advance()
+                        items.append(self.parse_expr())
+                    self.expect(RBRACKET)
+                    node = Index(node, TupleLit(items))
+                    continue
+                
                 self.expect(RBRACKET)
-                node = Index(node, index)
+                node = Index(node, start)
                 continue
             if self.check(LPAREN):
                 self.advance()
@@ -281,6 +445,8 @@ class Parser:
             return self.parse_dict_literal()
         if tok.type == LPAREN:
             return self.parse_tuple_or_group()
+        if tok.type == FUNC:
+            return self.parse_lambda()
         if tok.type == IDENT:
             self.advance()
             return Var(tok.value)

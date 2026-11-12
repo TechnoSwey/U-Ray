@@ -93,12 +93,13 @@ print("accuracy:", metrics[1])
 
 ## Примеры
 
-В репозитории сейчас два запускаемых ML-примера:
+В репозитории сейчас три запускаемых ML-примера:
 
 | Программа | Что показывает |
 | --- | --- |
 | [`save_load.ur`](examples/save_load.ur) | Обучение XOR, сохранение модели в JSON и загрузка для предсказаний |
 | [`train_batch_example.ur`](examples/train_batch_example.ur) | Синтетические данные, MLP и пакетное обучение с Adam |
+| [`progress.ur`](examples/progress.ur) | Показывает прогресс обучения и текущий loss после каждой эпохи |
 
 [Каталог примеров и команды запуска →](examples/README.md)
 

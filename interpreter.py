@@ -4,14 +4,16 @@ import os
 
 from errors import RuntimeErrorUray, URayError
 from values import (
-    DictValue, Builtin, Module, Function,
+    DictValue, Builtin, Module, Function, LambdaFunc, StructInstance,
     check_key, deep_equal, format_value
 )
+from tensor import Tensor
 from modules import ModuleRegistry
 from ast_nodes import (
     Program, Import, Assign, Del, Print, Number, Str, Var, BinOp,
-    If, While, For, Break, Continue, FuncDecl, Return, Block, Bool, Call,
-    ListLit, DictLit, Index, Attr, UnaryOp, TupleLit
+    If, While, For, Break, Continue, FuncDecl, MethodDecl, Lambda, Return, Block, Bool, Call,
+    ListLit, DictLit, Index, Attr, UnaryOp, TupleLit,
+    Try, Throw, Match, TypeDecl, Slice, Ternary
 )
 import values
 
@@ -27,6 +29,11 @@ class _BreakSignal(Exception):
 
 class _ContinueSignal(Exception):
     pass
+
+
+class _ThrowSignal(Exception):
+    def __init__(self, value):
+        self.value = value
 
 
 class Env:
@@ -72,8 +79,7 @@ class Interpreter:
         self.globals.set("copy", Builtin("copy", self._builtin_copy))
         self.globals.set("enumerate", Builtin("enumerate", self._builtin_enumerate))
         self.globals.set("zip", Builtin("zip", self._builtin_zip))
-
-        # строковые методы
+        
         self.globals.set("upper", Builtin("upper", self._str_upper))
         self.globals.set("lower", Builtin("lower", self._str_lower))
         self.globals.set("split", Builtin("split", self._str_split))
@@ -82,8 +88,194 @@ class Interpreter:
         self.globals.set("join", Builtin("join", self._str_join))
         self.globals.set("find", Builtin("find", self._str_find))
         self.globals.set("slice", Builtin("slice", self._str_slice))
+        
+        self.globals.set("zeros", Builtin("zeros", self._tensor_zeros))
+        self.globals.set("ones", Builtin("ones", self._tensor_ones))
+        self.globals.set("shape", Builtin("shape", self._tensor_shape))
+        
+        self.globals.set("read_file", Builtin("read_file", self._stl_read_file))
+        self.globals.set("write_file", Builtin("write_file", self._stl_write_file))
+        self.globals.set("append_file", Builtin("append_file", self._stl_append_file))
 
-    # ---------- базовые ----------
+        self.globals.set("sort", Builtin("sort", self._stl_sort))
+        self.globals.set("reverse", Builtin("reverse", self._stl_reverse))
+        self.globals.set("map", Builtin("map", self._stl_map))
+        self.globals.set("filter", Builtin("filter", self._stl_filter))
+        self.globals.set("reduce", Builtin("reduce", self._stl_reduce))
+
+        self.globals.set("progress", Builtin("progress", self._builtin_progress))
+
+    def _builtin_progress(self, args):
+        if len(args) not in (2, 3):
+            raise RuntimeErrorUray("progress ожидает 2 или 3 аргумента: current, total[, loss]")
+        cur = args[0]
+        total = args[1]
+        has_loss = len(args) == 3
+        loss = args[2] if has_loss else None
+        if not isinstance(cur, int) or isinstance(cur, bool):
+            raise RuntimeErrorUray("progress: current должен быть целым")
+        if not isinstance(total, int) or isinstance(total, bool) or total <= 0:
+            raise RuntimeErrorUray("progress: total должен быть положительным целым")
+        if has_loss and (
+            not isinstance(loss, (int, float)) or isinstance(loss, bool)
+        ):
+            raise RuntimeErrorUray("progress: loss должен быть числом")
+        if cur < 0:
+            cur = 0
+        if cur > total:
+            cur = total
+        width = 20
+        filled = int(width * cur / total)
+        bar = "█" * filled + "░" * (width - filled)
+        pct = int(100 * cur / total)
+        loss_text = f" loss: {loss:.6g}" if has_loss else ""
+        print(f"\r[{bar}] {pct}%{loss_text}", end="", flush=True)
+        if cur == total:
+            print()
+        return 0
+
+    # ---------- Тензоры ----------
+    def _tensor_zeros(self, args):
+        if len(args) != 1 or not isinstance(args[0], list):
+            raise RuntimeErrorUray("zeros ожидает список размерностей")
+        return Tensor.zeros(args[0])
+
+    def _tensor_ones(self, args):
+        if len(args) != 1 or not isinstance(args[0], list):
+            raise RuntimeErrorUray("ones ожидает список размерностей")
+        return Tensor.ones(args[0])
+
+    def _tensor_shape(self, args):
+        if len(args) != 1 or not isinstance(args[0], Tensor):
+            raise RuntimeErrorUray("shape ожидает тензор")
+        return args[0].shape()
+
+    # ---------- STL: Файлы ----------
+    def _resolve_path(self, path):
+        if os.path.isabs(path):
+            return path
+        return os.path.join(values.URAY_BASE_DIR, path)
+
+    def _stl_read_file(self, args):
+        if len(args) != 1 or not isinstance(args[0], str):
+            raise RuntimeErrorUray("read_file ожидает путь")
+        full = self._resolve_path(args[0])
+        try:
+            with open(full, "r", encoding="utf-8") as f:
+                return f.read()
+        except OSError as e:
+            raise RuntimeErrorUray(f"Не удалось прочитать {args[0]!r}: {e}")
+
+    def _stl_write_file(self, args):
+        if len(args) != 2 or not isinstance(args[0], str) or not isinstance(args[1], str):
+            raise RuntimeErrorUray("write_file ожидает путь и текст")
+        full = self._resolve_path(args[0])
+        try:
+            with open(full, "w", encoding="utf-8") as f:
+                f.write(args[1])
+            return 0
+        except OSError as e:
+            raise RuntimeErrorUray(f"Не удалось записать {args[0]!r}: {e}")
+
+    def _stl_append_file(self, args):
+        if len(args) != 2 or not isinstance(args[0], str) or not isinstance(args[1], str):
+            raise RuntimeErrorUray("append_file ожидает путь и текст")
+        full = self._resolve_path(args[0])
+        try:
+            with open(full, "a", encoding="utf-8") as f:
+                f.write(args[1])
+            return 0
+        except OSError as e:
+            raise RuntimeErrorUray(f"Не удалось дописать в {args[0]!r}: {e}")
+
+    # ---------- STL: Коллекции ----------
+    def _stl_sort(self, args):
+        if len(args) != 1 or not isinstance(args[0], list):
+            raise RuntimeErrorUray("sort ожидает список")
+        try:
+            args[0].sort()
+        except TypeError:
+            raise RuntimeErrorUray("sort: элементы списка должны быть сравнимы")
+        return args[0]
+
+    def _stl_reverse(self, args):
+        if len(args) != 1 or not isinstance(args[0], list):
+            raise RuntimeErrorUray("reverse ожидает список")
+        args[0].reverse()
+        return args[0]
+
+    def _apply_func(self, fn, arg):
+        if isinstance(fn, Builtin):
+            return fn.fn([arg])
+        if isinstance(fn, Function):
+            local = Env(parent=self.globals)
+            if len(fn.decl.params) != 1:
+                raise RuntimeErrorUray(f"Функция {fn.decl.name!r} должна принимать 1 аргумент")
+            local.set(fn.decl.params[0], arg)
+            saved_env = self.env
+            self.env = local
+            try:
+                self.exec_block(fn.decl.body)
+                return 0
+            except _ReturnSignal as sig:
+                return sig.value
+            finally:
+                self.env = saved_env
+        if isinstance(fn, LambdaFunc):
+            local = Env(parent=self.globals)
+            if len(fn.node.params) != 1:
+                raise RuntimeErrorUray("Лямбда должна принимать 1 аргумент")
+            local.set(fn.node.params[0], arg)
+            saved_env = self.env
+            self.env = local
+            try:
+                self.exec_block(fn.node.body)
+                return 0
+            except _ReturnSignal as sig:
+                return sig.value
+            finally:
+                self.env = saved_env
+        raise RuntimeErrorUray("Ожидается функция")
+
+    def _stl_map(self, args):
+        if len(args) != 2 or not isinstance(args[0], list):
+            raise RuntimeErrorUray("map ожидает список и функцию")
+        return [self._apply_func(args[1], x) for x in args[0]]
+
+    def _stl_filter(self, args):
+        if len(args) != 2 or not isinstance(args[0], list):
+            raise RuntimeErrorUray("filter ожидает список и функцию")
+        return [x for x in args[0] if self._apply_func(args[1], x)]
+
+    def _stl_reduce(self, args):
+        if len(args) != 3 or not isinstance(args[0], list):
+            raise RuntimeErrorUray("reduce ожидает список, функцию и начальное значение")
+        acc = args[2]
+        for x in args[0]:
+            if isinstance(args[1], Builtin):
+                acc = args[1].fn([acc, x])
+            elif isinstance(args[1], (Function, LambdaFunc)):
+                fn = args[1]
+                node = fn.decl if isinstance(fn, Function) else fn.node
+                if len(node.params) != 2:
+                    raise RuntimeErrorUray("reduce: функция должна принимать 2 аргумента")
+                local = Env(parent=self.globals)
+                local.set(node.params[0], acc)
+                local.set(node.params[1], x)
+                saved_env = self.env
+                self.env = local
+                try:
+                    self.exec_block(node.body)
+                    acc = 0
+                except _ReturnSignal as sig:
+                    acc = sig.value
+                finally:
+                    self.env = saved_env
+            else:
+                raise RuntimeErrorUray("reduce: ожидается функция")
+        return acc
+
+    # ---------- Базовые ----------
     def _builtin_len(self, args):
         if len(args) != 1:
             raise RuntimeErrorUray("len ожидает 1 аргумент")
@@ -176,7 +368,7 @@ class Interpreter:
             lists.append(a)
         return [tuple(t) for t in zip(*lists)]
 
-    # ---------- строковые ----------
+    # ---------- Строковые ----------
     def _check_str(self, name, x):
         if not isinstance(x, str):
             raise RuntimeErrorUray(f"{name} ожидает строку")
@@ -194,8 +386,7 @@ class Interpreter:
 
     def _str_split(self, args):
         if len(args) == 1:
-            s = self._check_str("split", args[0])
-            return s.split()
+            return self._check_str("split", args[0]).split()
         if len(args) == 2:
             s = self._check_str("split", args[0])
             sep = self._check_str("split", args[1])
@@ -234,9 +425,7 @@ class Interpreter:
     def _str_find(self, args):
         if len(args) != 2:
             raise RuntimeErrorUray("find ожидает 2 аргумента")
-        s = self._check_str("find", args[0])
-        sub = self._check_str("find", args[1])
-        return s.find(sub)
+        return self._check_str("find", args[0]).find(self._check_str("find", args[1]))
 
     def _str_slice(self, args):
         if len(args) != 3:
@@ -249,12 +438,10 @@ class Interpreter:
         if not isinstance(end, int) or isinstance(end, bool):
             raise RuntimeErrorUray("slice: end должен быть целым")
         if start < 0 or end > len(s) or start > end:
-            raise RuntimeErrorUray(
-                f"slice: диапазон {start}:{end} вне границ строки (длина {len(s)})"
-            )
+            raise RuntimeErrorUray(f"slice: диапазон {start}:{end} вне границ строки (длина {len(s)})")
         return s[start:end]
 
-    # ---------- выполнение ----------
+    # ---------- Выполнение ----------
     def run(self, program):
         for stmt in program.statements:
             self.exec_statement(stmt)
@@ -303,6 +490,17 @@ class Interpreter:
             return
 
         if isinstance(node, For):
+            if node.start is not None:
+                self.exec_statement(node.start)
+                while self.eval_expr(node.iterable):
+                    try:
+                        self.exec_block(node.body)
+                    except _ContinueSignal:
+                        pass
+                    except _BreakSignal:
+                        break
+                    self.exec_statement(node.step)
+                return
             iterable = self.eval_expr(node.iterable)
             if isinstance(iterable, DictValue):
                 items = iterable.keys()
@@ -313,15 +511,9 @@ class Interpreter:
             for item in items:
                 if isinstance(node.var, list):
                     if not isinstance(item, tuple):
-                        raise RuntimeErrorUray(
-                            "for с распаковкой ожидает кортежи "
-                            f"(получено {type(item).__name__})"
-                        )
+                        raise RuntimeErrorUray("for с распаковкой ожидает кортежи")
                     if len(node.var) != len(item):
-                        raise RuntimeErrorUray(
-                            f"for с распаковкой: ожидалось {len(node.var)} "
-                            f"элементов, получено {len(item)}"
-                        )
+                        raise RuntimeErrorUray(f"for с распаковкой: ожидалось {len(node.var)} элементов, получено {len(item)}")
                     for name, val in zip(node.var, item):
                         self.env.assign_existing(name, val)
                 else:
@@ -344,9 +536,39 @@ class Interpreter:
             self.env.set(node.name, Function(node))
             return
 
+        if isinstance(node, TypeDecl):
+            self.env.set(node.name, node)
+            return
+
         if isinstance(node, Return):
             value = 0 if node.value is None else self.eval_expr(node.value)
             raise _ReturnSignal(value)
+
+        if isinstance(node, Try):
+            try:
+                self.exec_block(node.try_block)
+            except (_ThrowSignal, RuntimeErrorUray) as e:
+                err_value = e.value if isinstance(e, _ThrowSignal) else str(e)
+                self.env.assign_existing(node.catch_var, err_value)
+                self.exec_block(node.catch_block)
+            return
+
+        if isinstance(node, Throw):
+            value = self.eval_expr(node.value)
+            raise _ThrowSignal(value)
+
+        if isinstance(node, Match):
+            value = self.eval_expr(node.expr)
+            matched = False
+            for pattern, block in node.cases:
+                pattern_value = self.eval_expr(pattern)
+                if deep_equal(value, pattern_value):
+                    self.exec_block(block)
+                    matched = True
+                    break
+            if not matched and node.default_block is not None:
+                self.exec_block(node.default_block)
+            return
 
         self.eval_expr(node)
         return
@@ -355,9 +577,7 @@ class Interpreter:
         base = values.URAY_BASE_DIR
         full = os.path.normpath(os.path.join(base, rel_path))
         if full in self.loaded_files:
-            raise RuntimeErrorUray(
-                f"Циклический импорт: {rel_path!r} уже загружен"
-            )
+            raise RuntimeErrorUray(f"Циклический импорт: {rel_path!r} уже загружен")
         if not os.path.isfile(full):
             raise RuntimeErrorUray(f"Файл для импорта не найден: {rel_path!r}")
         try:
@@ -370,7 +590,6 @@ class Interpreter:
         program = parse(src)
         sub = Interpreter(loaded_files=self.loaded_files | {full})
         sub.run(program)
-        # Экспортируем всё, кроме встроенных функций
         for name, val in sub.globals.vars.items():
             if not isinstance(val, Builtin):
                 self.globals.set(name, val)
@@ -386,16 +605,26 @@ class Interpreter:
                 check_key(key)
                 container[key] = value
                 return
+            if isinstance(container, Tensor):
+                container.set(key, value)
+                return
             if isinstance(container, list):
                 self.check_index(container, key)
                 container[key] = value
                 return
             if isinstance(container, tuple):
                 raise RuntimeErrorUray("Кортеж неизменяемый")
-            raise RuntimeErrorUray(
-                "Индексация возможна только для списков и словарей"
-            )
+            raise RuntimeErrorUray("Индексация возможна только для списков, тензоров и словарей")
         if isinstance(target, Attr):
+            container = self.eval_expr(target.target)
+            if isinstance(container, StructInstance):
+                if target.name not in container.fields:
+                    raise RuntimeErrorUray(f"В структуре {container.type_name!r} нет поля {target.name!r}")
+                container.fields[target.name] = value
+                return
+            if isinstance(container, DictValue):
+                container[target.name] = value
+                return
             raise RuntimeErrorUray("Присваивание в поле модуля запрещено")
         raise RuntimeErrorUray(f"Недопустимая цель присваивания: {target}")
 
@@ -418,15 +647,11 @@ class Interpreter:
 
     def check_index(self, container, index):
         if not isinstance(container, (list, tuple, str)):
-            raise RuntimeErrorUray(
-                "Индексация возможна только для списков, кортежей и строк"
-            )
+            raise RuntimeErrorUray("Индексация возможна только для списков, кортежей и строк")
         if not isinstance(index, int) or isinstance(index, bool):
             raise RuntimeErrorUray("Индекс должен быть целым числом")
         if index < 0 or index >= len(container):
-            raise RuntimeErrorUray(
-                f"Индекс {index} вне диапазона (длина {len(container)})"
-            )
+            raise RuntimeErrorUray(f"Индекс {index} вне диапазона (длина {len(container)})")
 
     def exec_block(self, block):
         for stmt in block.statements:
@@ -435,22 +660,16 @@ class Interpreter:
     def eval_expr(self, node):
         if isinstance(node, Number):
             return node.value
-
         if isinstance(node, Str):
             return node.value
-
         if isinstance(node, Bool):
             return node.value
-
         if isinstance(node, Var):
             return self.env.get(node.name)
-
         if isinstance(node, ListLit):
             return [self.eval_expr(item) for item in node.items]
-
         if isinstance(node, TupleLit):
             return tuple(self.eval_expr(item) for item in node.items)
-
         if isinstance(node, DictLit):
             d = DictValue()
             for key_node, value_node in node.pairs:
@@ -460,10 +679,29 @@ class Interpreter:
                     raise RuntimeErrorUray(f"Дублирующийся ключ {key!r}")
                 d[key] = self.eval_expr(value_node)
             return d
-
+        if isinstance(node, Lambda):
+            return LambdaFunc(node)
+        if isinstance(node, Ternary):
+            cond = self.eval_expr(node.cond)
+            if cond:
+                return self.eval_expr(node.true_val)
+            else:
+                return self.eval_expr(node.false_val)
         if isinstance(node, Index):
             container = self.eval_expr(node.target)
+            if isinstance(node.index, Slice):
+                start = self.eval_expr(node.index.start) if node.index.start is not None else None
+                end = self.eval_expr(node.index.end) if node.index.end is not None else None
+                if isinstance(container, list):
+                    return container[start:end]
+                if isinstance(container, Tensor):
+                    return container.slice(start, end)
+                raise RuntimeErrorUray("Срезы поддерживаются только для списков и тензоров")
+            
             key = self.eval_expr(node.index)
+            if isinstance(container, Tensor):
+                return container.get(key)
+
             if isinstance(container, DictValue):
                 check_key(key)
                 if key not in container:
@@ -472,45 +710,40 @@ class Interpreter:
             if isinstance(container, (list, tuple, str)):
                 self.check_index(container, key)
                 return container[key]
-            raise RuntimeErrorUray(
-                "Индексация возможна только для списков, кортежей, строк и словарей"
-            )
-
+            raise RuntimeErrorUray("Индексация возможна только для списков, кортежей, строк, словарей и тензоров")
         if isinstance(node, Attr):
             target = self.eval_expr(node.target)
-            if not isinstance(target, Module):
-                raise RuntimeErrorUray(
-                    f"Доступ к полю {node.name!r} возможен только у модуля"
-                )
-            if node.name not in target.members:
-                raise RuntimeErrorUray(
-                    f"В модуле {target.name!r} нет {node.name!r}"
-                )
-            return target.members[node.name]
-
+            if isinstance(target, Module):
+                if node.name not in target.members:
+                    raise RuntimeErrorUray(f"В модуле {target.name!r} нет {node.name!r}")
+                return target.members[node.name]
+            if isinstance(target, StructInstance):
+                if node.name in target.fields:
+                    return target.fields[node.name]
+                for m in target.methods:
+                    if m.name == node.name:
+                        return ("method", target, m)
+                raise RuntimeErrorUray(f"В структуре {target.type_name!r} нет поля или метода {node.name!r}")
+            if isinstance(target, DictValue):
+                if node.name not in target:
+                    raise RuntimeErrorUray(f"Ключ {node.name!r} не найден")
+                return target[node.name]
+            raise RuntimeErrorUray(f"Доступ к полю {node.name!r} возможен только у модуля, структуры или словаря")
         if isinstance(node, Call):
             return self.eval_call(node)
-
         if isinstance(node, UnaryOp):
             val = self.eval_expr(node.operand)
             if isinstance(val, bool):
-                raise RuntimeErrorUray(
-                    f"Унарный оператор {node.op!r} недопустим для bool"
-                )
+                raise RuntimeErrorUray(f"Унарный оператор {node.op!r} недопустим для bool")
             if not isinstance(val, (int, float)):
-                raise RuntimeErrorUray(
-                    f"Унарный оператор {node.op!r} недопустим для "
-                    f"{type(val).__name__}"
-                )
+                raise RuntimeErrorUray(f"Унарный оператор {node.op!r} недопустим для {type(val).__name__}")
             if node.op == "-":
                 return -val
             return +val
-
         if isinstance(node, BinOp):
             left = self.eval_expr(node.left)
             right = self.eval_expr(node.right)
             return self.apply_binop(node.op, left, right)
-
         raise RuntimeErrorUray(f"Неизвестное выражение: {node}")
 
     def apply_binop(self, op, left, right):
@@ -518,32 +751,20 @@ class Interpreter:
             return deep_equal(left, right)
         if op == "!=":
             return not deep_equal(left, right)
-
         if isinstance(left, str) or isinstance(right, str):
             if op == "+" and isinstance(left, str) and isinstance(right, str):
                 return left + right
-            raise RuntimeErrorUray(
-                f"Операция {op!r} недопустима для строки и {type(right).__name__}"
-            )
-
+            raise RuntimeErrorUray(f"Операция {op!r} недопустима для строки и {type(right).__name__}")
         if isinstance(left, (list, DictValue, tuple)) or isinstance(right, (list, DictValue, tuple)):
             if op == "+" and isinstance(left, list) and isinstance(right, list):
                 return left + right
-            raise RuntimeErrorUray(
-                f"Операция {op!r} недопустима для списков/словарей/кортежей"
-            )
-
+            raise RuntimeErrorUray(f"Операция {op!r} недопустима для списков/словарей/кортежей")
         if isinstance(left, bool) or isinstance(right, bool):
             if op in ("<", ">", "<=", ">="):
                 return self._cmp(op, int(left), int(right))
             raise RuntimeErrorUray(f"Операция {op!r} недопустима для булевых")
-
         if not isinstance(left, (int, float)) or not isinstance(right, (int, float)):
-            raise RuntimeErrorUray(
-                f"Операция {op!r} недопустима для "
-                f"{type(left).__name__} и {type(right).__name__}"
-            )
-
+            raise RuntimeErrorUray(f"Операция {op!r} недопустима для {type(left).__name__} и {type(right).__name__}")
         if op == "+":
             return left + right
         if op == "-":
@@ -582,19 +803,59 @@ class Interpreter:
         if isinstance(callee, Builtin):
             return callee.fn(args)
 
+        if isinstance(callee, LambdaFunc):
+            if len(args) != len(callee.node.params):
+                raise RuntimeErrorUray(f"Лямбда ожидает {len(callee.node.params)} аргументов, получено {len(args)}")
+            local = Env(parent=self.globals)
+            for name, val in zip(callee.node.params, args):
+                local.set(name, val)
+            saved_env = self.env
+            self.env = local
+            try:
+                self.exec_block(callee.node.body)
+                result = 0
+            except _ReturnSignal as sig:
+                result = sig.value
+            finally:
+                self.env = saved_env
+            return result
+
+        if isinstance(callee, tuple) and len(callee) == 3 and callee[0] == "method":
+            _, instance, method = callee
+            if len(args) != len(method.params):
+                raise RuntimeErrorUray(f"Метод {method.name!r} ожидает {len(method.params)} аргументов, получено {len(args)}")
+            local = Env(parent=self.globals)
+            local.set("self", instance)
+            for name, val in zip(method.params, args):
+                local.set(name, val)
+            saved_env = self.env
+            self.env = local
+            try:
+                self.exec_block(method.body)
+                result = 0
+            except _ReturnSignal as sig:
+                result = sig.value
+            finally:
+                self.env = saved_env
+            return result
+
+        if isinstance(callee, TypeDecl):
+            if len(args) != len(callee.fields):
+                raise RuntimeErrorUray(f"Структура {callee.name!r} ожидает {len(callee.fields)} аргументов, получено {len(args)}")
+            fields = DictValue()
+            for fname, val in zip(callee.fields, args):
+                fields[fname] = val
+            return StructInstance(callee.name, fields, callee.methods)
+
         if not isinstance(callee, Function):
             raise RuntimeErrorUray("Попытка вызвать не функцию")
 
         decl = callee.decl
         if len(args) != len(decl.params):
-            raise RuntimeErrorUray(
-                f"Функция {decl.name!r} ожидает {len(decl.params)} аргументов, "
-                f"получено {len(args)}"
-            )
+            raise RuntimeErrorUray(f"Функция {decl.name!r} ожидает {len(decl.params)} аргументов, получено {len(args)}")
         local = Env(parent=self.globals)
         for name, val in zip(decl.params, args):
             local.set(name, val)
-
         saved_env = self.env
         self.env = local
         try:
@@ -608,4 +869,7 @@ class Interpreter:
 
 
 def run(program):
-    Interpreter().run(program)
+    try:
+        Interpreter().run(program)
+    except _ThrowSignal as e:
+        raise RuntimeErrorUray(f"Непойманная ошибка: {e.value}")

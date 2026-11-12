@@ -35,7 +35,8 @@ for ur in "$TESTS_DIR"/*.ur; do
         echo "SKIP $base (нет .expected)"
         continue
     fi
-    actual="$(cd "$URAY_DIR" && python3 main.py "$ur" 2>&1)"
+    actual="$("$URAY_DIR/uray" "$ur" 2>&1)"
+    actual="${actual//$'\r'/}"
     if [ "$actual" == "$(cat "$expected")" ]; then
         echo "PASS $base"
         PASS=$((PASS + 1))
