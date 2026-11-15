@@ -1,0 +1,13 @@
+syntax "uray" "\.ur$"
+
+comment "//"
+tabgives "    "
+color lightgreen start="\"" end="\""
+color lightyellow "\<(if|else|while|for|in|break|continue|func|return|import|del|try|catch|throw|match|type)\>"
+color lightcyan "\<(true|false)\>"
+color lightblue "\<(print|len|range|push|pop|type_of)\>"
+color lightmagenta "\<(nn|math|linalg)\.[[:alpha:]_][[:alnum:]_]*"
+color lightred "\<[0-9]+(\.[0-9]+)?\>"
+color cyan "\<[[:alpha:]_][[:alnum:]_]*[[:space:]]*\("
+color yellow "==|!=|<=|>=|[+*/%=<>!-]"
+color lightblack "//.*$"

@@ -9,5 +9,7 @@
 | [`save_load.ur`](save_load.ur) | Обучает XOR, сохраняет модель в JSON и загружает её для предсказаний | `./uray examples/save_load.ur` |
 | [`train_batch_example.ur`](train_batch_example.ur) | Создаёт синтетические данные, обучает MLP батчами с Adam и выводит метрики | `./uray examples/train_batch_example.ur` |
 | [`progress.ur`](progress.ur) | Показывает прогресс обучения и текущий loss по эпохам | `./uray examples/progress.ur` |
+| [`match_struct.ur`](match_struct.ur) | Деструктурирует вложенные структуры в `match` | `./uray examples/match_struct.ur` |
+| [`numpy_backend.ur`](numpy_backend.ur) | Считает матричное произведение через NumPy backend | `./uray examples/numpy_backend.ur --backend=numpy` |
 
 В корневом [README](../README.md) есть быстрый старт, обзор возможностей и пример кода U-Ray.

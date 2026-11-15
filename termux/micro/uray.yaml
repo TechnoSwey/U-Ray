@@ -1,0 +1,31 @@
+filetype: uray
+
+detect:
+    filename: "\\.ur$"
+
+rules:
+    - identifier.var: "\\b[A-Za-z_][A-Za-z0-9_]*\\b"
+    - statement: "\\b(if|else|while|for|in|break|continue|try|catch|throw|match)\\b"
+    - preproc: "\\b(func|return|import|del|print|len|range|push|pop|type_of|dense|mlp|forward|forward_dense|forward_mlp|train|evaluate|mse|softmax|sigmoid|relu|matmul|transpose|dot)\\b"
+    - type.keyword: "\\b(type)\\b"
+    - constant.bool: "\\b(true|false)\\b"
+    - constant.number: "\\b[0-9]+(\\.[0-9]+)?\\b"
+    - identifier.macro: "\\b(nn|math|linalg)\\b"
+    - symbol: "(,|\\.)"
+    - symbol.operator: "[-+/*=<>!~%&|^]|==|!=|<=|>="
+    - symbol.brackets: "(\\{|\\})"
+    - symbol.brackets: "(\\(|\\))"
+    - symbol.brackets: "(\\[|\\])"
+
+    - constant.string:
+        start: "\""
+        end: "\""
+        skip: "\\\\."
+        rules:
+            - constant.specialChar: "\\\\."
+
+    - comment:
+        start: "//"
+        end: "$"
+        rules:
+            - todo: "(TODO|XXX|FIXME):?"

@@ -115,8 +115,10 @@ class Return(Node):
 
 
 class Block(Node):
-    def __init__(self, statements):
+    def __init__(self, statements, start=None, end=None):
         self.statements = statements
+        self.start = start
+        self.end = end
     def __repr__(self):
         return f"Block({self.statements})"
 
@@ -138,19 +140,54 @@ class Throw(Node):
 
 
 class Match(Node):
-    def __init__(self, expr, cases):
+    def __init__(self, expr, cases, start=None, end=None):
         self.expr = expr
         self.cases = cases
         self.default_block = None
+        self.start = start
+        self.end = end
     def __repr__(self):
         return f"Match({self.expr}, {self.cases}, default={self.default_block})"
 
 
+class StructPattern(Node):
+    def __init__(self, type_name, fields, named=False):
+        self.type_name = type_name
+        self.fields = fields
+        self.named = named
+
+    def __repr__(self):
+        return f"StructPattern({self.type_name!r}, {self.fields}, named={self.named})"
+
+
+class BindPattern(Node):
+    def __init__(self, name):
+        self.name = name
+
+    def __repr__(self):
+        return f"BindPattern({self.name!r})"
+
+
+class WildcardPattern(Node):
+    def __repr__(self):
+        return "WildcardPattern()"
+
+
+class ExprStmt(Node):
+    def __init__(self, expr):
+        self.expr = expr
+
+    def __repr__(self):
+        return f"ExprStmt({self.expr})"
+
+
 class TypeDecl(Node):
-    def __init__(self, name, fields, methods):
+    def __init__(self, name, fields, methods, start=None, end=None):
         self.name = name
         self.fields = fields
         self.methods = methods
+        self.start = start
+        self.end = end
     def __repr__(self):
         return f"TypeDecl({self.name!r}, {self.fields}, {len(self.methods)} methods)"
 
@@ -240,9 +277,11 @@ class Attr(Node):
 
 
 class Call(Node):
-    def __init__(self, callee, args):
+    def __init__(self, callee, args, line=None, col=None):
         self.callee = callee
         self.args = args
+        self.line = line
+        self.col = col
     def __repr__(self):
         return f"Call({self.callee}, {self.args})"
 

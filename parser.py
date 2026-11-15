@@ -13,7 +13,8 @@ from ast_nodes import (
     Program, Import, Assign, Del, Print, Number, Str, Var, BinOp,
     If, While, For, Break, Continue, FuncDecl, MethodDecl, Return, Block, Bool, Call,
     ListLit, DictLit, Index, Attr, UnaryOp, TupleLit,
-    Try, Throw, Match, TypeDecl, Slice, Lambda, Ternary
+    Try, Throw, Match, TypeDecl, Slice, Lambda, Ternary,
+    StructPattern, BindPattern, WildcardPattern, ExprStmt
 )
 
 
@@ -80,12 +81,17 @@ class Parser:
         if self.check(TYPE):
             return self.parse_type()
         if self.check(IDENT):
-            left = self.parse_factor()
+            left = self.parse_expr()
             if self.check(ASSIGN):
                 self.advance()
                 value = self.parse_expr()
                 return Assign(left, value)
-            return left
+            return ExprStmt(left)
+        if self.check(NUMBER) or self.check(STRING) or self.check(TRUE) \
+                or self.check(FALSE) or self.check(LBRACKET) \
+                or self.check(LBRACE) or self.check(LPAREN) \
+                or self.check(FUNC) or self.check(MINUS) or self.check(PLUS):
+            return ExprStmt(self.parse_expr())
         tok = self.peek()
         raise ParseError(
             f"Неожиданный токен {tok.type} ({tok.value!r}) в {tok.line}:{tok.col}"
@@ -114,7 +120,7 @@ class Parser:
     def parse_match(self):
         self.expect(MATCH)
         expr = self.parse_expr()
-        self.expect(LBRACE)
+        open_token = self.expect(LBRACE)
         cases = []
         default_block = None
         while not self.check(RBRACE):
@@ -122,18 +128,74 @@ class Parser:
                 self.advance()
                 default_block = self.parse_block()
             else:
-                pattern = self.parse_expr()
+                pattern = self.parse_match_pattern()
                 block = self.parse_block()
                 cases.append((pattern, block))
-        self.expect(RBRACE)
-        node = Match(expr, cases)
+        close_token = self.expect(RBRACE)
+        node = Match(
+            expr,
+            cases,
+            start=(open_token.line, open_token.col),
+            end=(close_token.line, close_token.col),
+        )
         node.default_block = default_block
         return node
+
+    def parse_match_pattern(self):
+        """Parse constructor-style struct patterns, falling back to value patterns."""
+        if self.check(IDENT) and self.pos + 1 < len(self.tokens) \
+                and self.tokens[self.pos + 1].type in (LPAREN, LBRACE):
+            type_name = self.advance().value
+            if self.check(LPAREN):
+                self.advance()
+                fields = []
+                if not self.check(RPAREN):
+                    fields.append(self.parse_match_pattern_item())
+                    while self.check(COMMA):
+                        self.advance()
+                        if self.check(RPAREN):
+                            break
+                        fields.append(self.parse_match_pattern_item())
+                self.expect(RPAREN)
+                return StructPattern(type_name, fields)
+
+            self.expect(LBRACE)
+            fields = []
+            seen_fields = set()
+            while not self.check(RBRACE):
+                field_name = self.expect(IDENT).value
+                if field_name in seen_fields:
+                    raise ParseError(f"Поле {field_name!r} повторяется в шаблоне")
+                seen_fields.add(field_name)
+                if self.check(COLON):
+                    self.advance()
+                    field_pattern = self.parse_match_pattern_item()
+                else:
+                    field_pattern = BindPattern(field_name)
+                fields.append((field_name, field_pattern))
+                if self.check(COMMA):
+                    self.advance()
+                    continue
+                break
+            self.expect(RBRACE)
+            return StructPattern(type_name, fields, named=True)
+        return self.parse_expr()
+
+    def parse_match_pattern_item(self):
+        if self.check(UNDERSCORE):
+            self.advance()
+            return WildcardPattern()
+        if self.check(IDENT) and self.pos + 1 < len(self.tokens) \
+                and self.tokens[self.pos + 1].type in (LPAREN, LBRACE):
+            return self.parse_match_pattern()
+        if self.check(IDENT):
+            return BindPattern(self.advance().value)
+        return self.parse_expr()
 
     def parse_type(self):
         self.expect(TYPE)
         name = self.expect(IDENT).value
-        self.expect(LBRACE)
+        open_token = self.expect(LBRACE)
         fields = []
         methods = []
         while not self.check(RBRACE):
@@ -157,8 +219,14 @@ class Parser:
                 methods.append(MethodDecl(mname, params, body))
             else:
                 fields.append(self.expect(IDENT).value)
-        self.expect(RBRACE)
-        return TypeDecl(name, fields, methods)
+        close_token = self.expect(RBRACE)
+        return TypeDecl(
+            name,
+            fields,
+            methods,
+            start=(open_token.line, open_token.col),
+            end=(close_token.line, close_token.col),
+        )
 
     def parse_import(self):
         self.expect(IMPORT)
@@ -308,12 +376,16 @@ class Parser:
         return Return(value)
 
     def parse_block(self):
-        self.expect(LBRACE)
+        open_token = self.expect(LBRACE)
         statements = []
         while not self.check(RBRACE):
             statements.append(self.parse_statement())
-        self.expect(RBRACE)
-        return Block(statements)
+        close_token = self.expect(RBRACE)
+        return Block(
+            statements,
+            start=(open_token.line, open_token.col),
+            end=(close_token.line, close_token.col),
+        )
 
     def parse_expr(self):
         left = self.parse_additive()
@@ -412,7 +484,7 @@ class Parser:
                 node = Index(node, start)
                 continue
             if self.check(LPAREN):
-                self.advance()
+                open_token = self.advance()
                 args = []
                 if not self.check(RPAREN):
                     args.append(self.parse_expr())
@@ -420,7 +492,7 @@ class Parser:
                         self.advance()
                         args.append(self.parse_expr())
                 self.expect(RPAREN)
-                node = Call(node, args)
+                node = Call(node, args, line=open_token.line, col=open_token.col)
                 continue
             break
         return node

@@ -53,15 +53,50 @@ cd U-Ray
 python3 main.py examples/save_load.ur
 ```
 
+Интерактивный режим и CLI:
+
+```bash
+./uray --help
+./uray --version
+./uray --repl
+./uray examples/numpy_backend.ur --backend=numpy
+./uray check examples/mlp_xor.ur
+./uray fmt examples/mlp_xor.ur
+./uray fmt --write examples/mlp_xor.ur
+```
+
+Без имени файла `uray` тоже открывает REPL. Базовый backend не требует
+сторонних библиотек; `--backend=numpy` ускоряет тензорные операции, если
+установлен NumPy (`python3 -m pip install numpy`). Высокоуровневое обучение
+`nn.train` пока выполняется в Python. В интерактивном режиме Tab дополняет
+имена переменных, встроенные функции, модули и поля структур на платформах
+с Python `readline`.
+
 ## Возможности
 
 | Язык | Математика | Машинное обучение |
 | --- | --- | --- |
 | Функции, рекурсия, условия и циклы | Встроенные `math` и `linalg` | `nn`: dense-слои, MLP и backprop |
 | Списки, словари, кортежи и строки | Векторы и матричные операции | SGD, Momentum, Adam и обучение по батчам |
-| Предсказуемые правила типов и копирования | Чистый Python — базовый режим | Оценка, сохранение и загрузка моделей |
+| Деструктуризация структур в `match` | Python по умолчанию, NumPy по выбору | Прогресс обучения, оценка и экспорт в PyTorch |
+| REPL с Tab-дополнением и CLI | `uray fmt` для единого стиля | Предварительная проверка размерностей ML |
+| Сохранение и загрузка моделей | Без обязательных зависимостей | Подсветка для VS Code и Termux |
 
-Ошибки языка сопровождаются позицией в файле. NumPy и PyPy можно подключить отдельно для ускорения.
+`uray fmt file.ur` печатает отформатированный код; для записи используй
+`uray fmt --write file.ur`, а `uray fmt --check file.ur` подходит для CI.
+Перед выполнением файла U-Ray проверяет известные размерности. Команда
+`uray check file.ur` запускает эту проверку без исполнения программы.
+
+Расширение VS Code доступно локально в
+[`vscode/uray-language`](vscode/uray-language/README.md); публикации в
+Marketplace пока нет. Настройки подсветки для Termux (`nano`, Vim, Neovim и `micro`)
+описаны в [`termux/README.md`](termux/README.md). Встроенная Tab-подсказка
+работает в REPL на платформах с модулем `readline`; Jupyter kernel в этот
+релиз не входит.
+
+Файл модели `.pt` экспортируется при отдельно установленном PyTorch
+(`python3 -m pip install torch`). Экспорт содержит параметры и описание
+архитектуры; обучение и импорт PyTorch-моделей в U-Ray не входят в этот формат.
 
 ## От исходника до результата
 
@@ -85,7 +120,7 @@ X = [[0.0, 0.0], [0.0, 1.0], [1.0, 0.0], [1.0, 1.0]]
 Y = [[0.0], [1.0], [1.0], [0.0]]
 
 model = nn.mlp([2, 4, 1], "sigmoid")
-history = nn.train(model, X, Y, epochs=2000, lr=0.5, batch_size=4, loss="mse", optimizer="sgd")
+history = nn.train(model, X, Y, 2000, 0.5, 4, "mse", "sgd")
 metrics = nn.evaluate(model, X, Y, "mse")
 print("loss:", metrics[0])
 print("accuracy:", metrics[1])
@@ -110,6 +145,7 @@ print("accuracy:", metrics[1])
 | [Язык](docs/LANGUAGE.md) | Синтаксис, типы, операторы, функции и семантика |
 | [ML-модуль](docs/ML.md) | `math`, `linalg`, `nn`, оптимизаторы и рецепты обучения |
 | [Архитектура](docs/ARCHITECTURE.md) | Устройство интерпретатора и точки расширения |
+| [Инструменты](docs/TOOLS.md) | VS Code, REPL, formatter и статическая проверка |
 
 ## Тесты
 

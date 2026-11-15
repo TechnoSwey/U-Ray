@@ -19,9 +19,5 @@ for i in range(N) {
 model = nn.mlp([2, 16, 16, 1], "leaky_relu")
 epochs = 50
 
-for epoch in range(epochs) {
-    cache_history = nn.train(model, X, Y, 1, 0.01, 32, "bce", "adam")
-    progress(epoch + 1, epochs, cache_history[0])
-}
-
+history = nn.train(model, X, Y, epochs, 0.01, 32, "bce", "adam", true)
 print("done")

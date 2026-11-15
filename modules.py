@@ -36,7 +36,7 @@ class ModuleRegistry:
                     raise R(f"math.{name} ожидает число")
                 try:
                     return float(fn(x))
-                except ValueError as e:
+                except (ValueError, OverflowError) as e:
                     raise R(f"math.{name}: {e}")
             return Builtin(name, impl)
 
@@ -177,6 +177,30 @@ class ModuleRegistry:
             for x in v:
                 if not isinstance(x, (int, float)) or isinstance(x, bool):
                     raise R(f"nn.{name}: элементы должны быть числами")
+
+        def as_vector(name, value):
+            vector = value.to_list() if isinstance(value, Tensor) else value
+            ensure_vector(name, vector)
+            return vector
+
+        def layer_data(name, layer):
+            if not isinstance(layer, DictValue) or "W" not in layer or "b" not in layer:
+                raise R(f"nn.{name} ожидает слой")
+            W = layer["W"]
+            b = layer["b"]
+            W_list = W.to_list() if isinstance(W, Tensor) else W
+            b_list = b.to_list() if isinstance(b, Tensor) else b
+            if not isinstance(W_list, list) or not W_list:
+                raise R(f"nn.{name}: W должен быть непустой матрицей")
+            for row in W_list:
+                ensure_vector(name, row)
+            width = len(W_list[0])
+            if width == 0 or any(len(row) != width for row in W_list):
+                raise R(f"nn.{name}: строки W должны иметь одинаковую ненулевую длину")
+            ensure_vector(name, b_list)
+            if len(b_list) != len(W_list):
+                raise R(f"nn.{name}: длина b должна совпадать с числом строк W")
+            return W_list, b_list
 
         def _stable_sigmoid(x):
             x = float(x)
@@ -350,13 +374,13 @@ class ModuleRegistry:
         def forward(args):
             if len(args) != 2: raise R("nn.forward ожидает 2 аргумента")
             layer, x = args
-            if not isinstance(layer, DictValue) or "W" not in layer or "b" not in layer:
-                raise R("nn.forward ожидает слой")
-            W = layer["W"]
-            b = layer["b"]
-            x_list = x.to_list() if isinstance(x, Tensor) else list(x)
-            W_list = W.to_list()
-            b_list = b.to_list()
+            W_list, b_list = layer_data("forward", layer)
+            x_list = as_vector("forward", x)
+            if len(x_list) != len(W_list[0]):
+                raise R(
+                    f"nn.forward: размер входа {len(x_list)} не совпадает "
+                    f"с ожидаемым {len(W_list[0])}"
+                )
             out = []
             for i in range(len(W_list)):
                 s = float(b_list[i])
@@ -368,13 +392,13 @@ class ModuleRegistry:
         def forward_dense(args):
             if len(args) != 2: raise R("nn.forward_dense ожидает 2 аргумента")
             layer, x = args
-            if not isinstance(layer, DictValue) or "W" not in layer or "b" not in layer:
-                raise R("nn.forward_dense ожидает слой")
-            W = layer["W"]
-            b = layer["b"]
-            x_list = x.to_list() if isinstance(x, Tensor) else list(x)
-            W_list = W.to_list()
-            b_list = b.to_list()
+            W_list, b_list = layer_data("forward_dense", layer)
+            x_list = as_vector("forward_dense", x)
+            if len(x_list) != len(W_list[0]):
+                raise R(
+                    f"nn.forward_dense: размер входа {len(x_list)} не совпадает "
+                    f"с ожидаемым {len(W_list[0])}"
+                )
             z = []
             for i in range(len(W_list)):
                 s = float(b_list[i])
@@ -386,12 +410,19 @@ class ModuleRegistry:
         def backward_dense(args):
             if len(args) != 3: raise R("nn.backward_dense ожидает 3 аргумента")
             layer, x, grad_z = args
-            if not isinstance(layer, DictValue) or "W" not in layer or "b" not in layer:
-                raise R("nn.backward_dense ожидает слой")
-            W = layer["W"]
-            x_list = x.to_list() if isinstance(x, Tensor) else list(x)
-            W_list = W.to_list()
-            gz = grad_z.to_list() if isinstance(grad_z, Tensor) else list(grad_z)
+            W_list, _ = layer_data("backward_dense", layer)
+            x_list = as_vector("backward_dense", x)
+            gz = as_vector("backward_dense", grad_z)
+            if len(x_list) != len(W_list[0]):
+                raise R(
+                    f"nn.backward_dense: размер входа {len(x_list)} не совпадает "
+                    f"с ожидаемым {len(W_list[0])}"
+                )
+            if len(gz) != len(W_list):
+                raise R(
+                    f"nn.backward_dense: размер grad_z {len(gz)} не совпадает "
+                    f"с ожидаемым {len(W_list)}"
+                )
             grad_W = []
             for i in range(len(W_list)):
                 row = []
@@ -507,14 +538,18 @@ class ModuleRegistry:
             layers = model["layers"]
             act = model["act"]
             out_act = model["out_act"]
-            x_list = x.to_list() if isinstance(x, Tensor) else list(x)
+            x_list = as_vector("forward_mlp", x)
             cache = [list(x_list)]
             cur = list(x_list)
             n = len(layers)
             for k in range(n):
                 layer = layers[k]
-                W_list = layer["W"].to_list() if isinstance(layer["W"], Tensor) else layer["W"]
-                b_list = layer["b"].to_list() if isinstance(layer["b"], Tensor) else layer["b"]
+                W_list, b_list = layer_data("forward_mlp", layer)
+                if len(cur) != len(W_list[0]):
+                    raise R(
+                        f"nn.forward_mlp: размер входа слоя {k} ({len(cur)}) "
+                        f"не совпадает с ожидаемым {len(W_list[0])}"
+                    )
                 z = []
                 for i in range(len(W_list)):
                     s = float(b_list[i])
@@ -540,12 +575,14 @@ class ModuleRegistry:
                 raise R("nn.backward_mlp ожидает model, cache, grad_out (опционально skip_last_act)")
             model, cache, grad_out = args[0], args[1], args[2]
             skip_last_act = args[3] if len(args) == 4 else False
+            if not isinstance(skip_last_act, bool):
+                raise R("nn.backward_mlp: skip_last_act должен быть bool")
             if not isinstance(model, DictValue) or "layers" not in model:
                 raise R("nn.backward_mlp ожидает модель")
             layers = model["layers"]
             act = model["act"]
             out_act = model["out_act"]
-            grad_list = grad_out.to_list() if isinstance(grad_out, Tensor) else list(grad_out)
+            grad_list = as_vector("backward_mlp", grad_out)
             n = len(layers)
             expected = 1 + 2 * n
             if len(cache) != expected:
@@ -555,18 +592,37 @@ class ModuleRegistry:
             for k in range(n - 1, -1, -1):
                 x_in = cache[2 * k]
                 z = cache[2 * k + 1]
+                x_in = as_vector("backward_mlp", x_in)
+                z = as_vector("backward_mlp", z)
+                layer = layers[k]
+                W_list, _ = layer_data("backward_mlp", layer)
+                if len(x_in) != len(W_list[0]) or len(z) != len(W_list):
+                    raise R(f"nn.backward_mlp: некорректная форма cache для слоя {k}")
+                if len(grad) != len(z):
+                    raise R(
+                        f"nn.backward_mlp: размер градиента {len(grad)} "
+                        f"не совпадает с размером слоя {len(z)}"
+                    )
                 if k == n - 1:
-                    if skip_last_act or out_act == "softmax" or out_act == "linear":
+                    if skip_last_act or out_act == "linear":
                         grad_z = list(grad)
-                    else:
+                    elif out_act == "sigmoid":
                         grad_z = []
                         for zi, gi in zip(z, grad):
                             s = _stable_sigmoid(zi)
                             grad_z.append(gi * s * (1.0 - s))
+                    elif out_act == "softmax":
+                        probabilities = as_vector(
+                            "backward_mlp", cache[2 * k + 2]
+                        )
+                        dot = sum(g * p for g, p in zip(grad, probabilities))
+                        grad_z = [
+                            p * (g - dot) for g, p in zip(grad, probabilities)
+                        ]
+                    else:
+                        raise R(f"nn.backward_mlp: неизвестная активация {out_act!r}")
                 else:
                     grad_z = _act_grad(act, z, grad)
-                layer = layers[k]
-                W_list = layer["W"].to_list() if isinstance(layer["W"], Tensor) else layer["W"]
                 grad_W = []
                 for i in range(len(W_list)):
                     row = []
@@ -847,6 +903,61 @@ class ModuleRegistry:
                 raise R(f"nn.load: некорректный JSON: {e}")
             return _plain_to_model(data)
 
+        def export_pytorch(args):
+            if len(args) != 2:
+                raise R("nn.export_pytorch ожидает model и path")
+            model, path = args
+            if not isinstance(model, DictValue) or "layers" not in model:
+                raise R("nn.export_pytorch ожидает модель")
+            if not isinstance(path, str):
+                raise R("nn.export_pytorch: path должен быть строкой")
+            try:
+                import torch
+            except ImportError as e:
+                raise R(
+                    "nn.export_pytorch требует PyTorch. Установите его отдельно: "
+                    "python3 -m pip install torch"
+                ) from e
+
+            plain = _model_to_plain(model)
+            plain_layers = plain["layers"]
+            if not plain_layers:
+                raise R("nn.export_pytorch: модель должна содержать хотя бы один слой")
+            sizes = [len(plain_layers[0]["W"][0])]
+            state_dict = {}
+            for index, layer in enumerate(plain_layers):
+                weights = layer["W"]
+                if not weights or any(len(row) != len(weights[0]) for row in weights):
+                    raise R(f"nn.export_pytorch: некорректная матрица весов слоя {index}")
+                if len(layer["b"]) != len(weights):
+                    raise R(f"nn.export_pytorch: некорректный bias слоя {index}")
+                if len(weights[0]) != sizes[-1]:
+                    raise R(
+                        f"nn.export_pytorch: размер входа слоя {index} "
+                        "не совпадает с предыдущим слоем"
+                    )
+                sizes.append(len(weights))
+                state_dict[f"layers.{index}.weight"] = torch.tensor(
+                    weights, dtype=torch.float32
+                )
+                state_dict[f"layers.{index}.bias"] = torch.tensor(
+                    layer["b"], dtype=torch.float32
+                )
+            checkpoint = {
+                "format": "uray.pytorch",
+                "version": 1,
+                "sizes": sizes,
+                "act": plain["act"],
+                "out_act": plain["out_act"],
+                "state_dict": state_dict,
+            }
+            full_path = _resolve_path(path)
+            try:
+                torch.save(checkpoint, full_path)
+            except (OSError, RuntimeError, ValueError) as e:
+                raise R(f"nn.export_pytorch: не удалось записать checkpoint: {e}")
+            return full_path
+
         def _compute_loss(loss_name, yhat, y):
             if loss_name == "bce": return bce([yhat, y])
             if loss_name == "mse": return mse([yhat, y])
@@ -874,33 +985,55 @@ class ModuleRegistry:
             model, X, Y, loss_name = args
             if not isinstance(X, list) or not isinstance(Y, list): raise R("nn.evaluate ожидает списки")
             if len(X) != len(Y): raise R("nn.evaluate: X и Y разной длины")
+            if not X: raise R("nn.evaluate: набор данных не должен быть пустым")
+            if loss_name not in ("bce", "mse", "cce"):
+                raise R(f"nn.evaluate: неизвестная функция потерь {loss_name!r}")
             total_loss = 0.0
             correct = 0
             for i in range(len(X)):
                 yhat = forward_mlp([model, X[i]])[-1]
                 y = Y[i]
                 total_loss += _compute_loss(loss_name, yhat, y)
-                pred = 0
-                for k in range(1, len(yhat)):
-                    if yhat[k] > yhat[pred]: pred = k
-                true_best = 0
-                for k in range(1, len(y)):
-                    if y[k] > y[true_best]: true_best = k
-                if pred == true_best: correct += 1
+                if len(yhat) == 1:
+                    pred = 1.0 if yhat[0] >= 0.5 else 0.0
+                    target = 1.0 if y[0] >= 0.5 else 0.0
+                    if pred == target:
+                        correct += 1
+                else:
+                    pred = 0
+                    for k in range(1, len(yhat)):
+                        if yhat[k] > yhat[pred]: pred = k
+                    true_best = 0
+                    for k in range(1, len(y)):
+                        if y[k] > y[true_best]: true_best = k
+                    if pred == true_best: correct += 1
             return [total_loss / len(X), correct / len(X)]
 
         def train(args):
-            if len(args) < 5 or len(args) > 8:
-                raise R("nn.train ожидает model, X, Y, epochs, lr (опционально batch_size, loss, optimizer)")
+            if len(args) < 5 or len(args) > 9:
+                raise R("nn.train ожидает model, X, Y, epochs, lr (опционально batch_size, loss, optimizer, show_progress)")
             model, X, Y, epochs, lr = args[0], args[1], args[2], args[3], args[4]
             batch_size = args[5] if len(args) > 5 else 32
             loss_name = args[6] if len(args) > 6 else "bce"
             opt_name = args[7] if len(args) > 7 else "adam"
+            show_progress = args[8] if len(args) > 8 else False
             if not isinstance(X, list) or not isinstance(Y, list):
                 raise R("nn.train ожидает списки X и Y")
             if len(X) != len(Y): raise R("nn.train: X и Y разной длины")
-            if not isinstance(epochs, int) or epochs <= 0: raise R("nn.train: epochs > 0")
-            if not isinstance(batch_size, int) or batch_size <= 0: raise R("nn.train: batch_size > 0")
+            if not X: raise R("nn.train: набор данных не должен быть пустым")
+            if not isinstance(epochs, int) or isinstance(epochs, bool) or epochs <= 0: raise R("nn.train: epochs > 0")
+            if not isinstance(batch_size, int) or isinstance(batch_size, bool) or batch_size <= 0: raise R("nn.train: batch_size > 0")
+            if not isinstance(show_progress, bool):
+                raise R("nn.train: show_progress должен быть bool")
+            if not isinstance(model, DictValue) or "layers" not in model:
+                raise R("nn.train ожидает модель")
+            if loss_name not in ("bce", "mse", "cce"):
+                raise R(f"nn.train: неизвестная функция потерь {loss_name!r}")
+            if loss_name == "bce" and model["out_act"] != "sigmoid":
+                raise R("nn.train: bce требует out_act=\"sigmoid\"")
+            if loss_name == "cce" and model["out_act"] != "softmax":
+                raise R("nn.train: cce требует out_act=\"softmax\"")
+            ensure_number("train", lr)
             state = None
             if opt_name == "adam": state = adam_init([model])
             elif opt_name == "momentum": state = momentum_init([model])
@@ -911,7 +1044,6 @@ class ModuleRegistry:
             for epoch in range(epochs):
                 _pyrandom.shuffle(indices)
                 epoch_loss = 0.0
-                num_batches = 0
                 for i in range(0, n, batch_size):
                     batch_indices = indices[i:i+batch_size]
                     count = len(batch_indices)
@@ -923,7 +1055,13 @@ class ModuleRegistry:
                         y = Y[idx]
                         batch_loss += _compute_loss(loss_name, yhat, y)
                         grad_out = _compute_grad(loss_name, yhat, y)
-                        grads = backward_mlp([model, cache, grad_out, True])
+                        # BCE+sigmoid and CCE+softmax have a fused dL/dz.
+                        # Other loss/activation pairs need the activation's Jacobian.
+                        skip_last_act = (
+                            (loss_name == "bce" and model["out_act"] == "sigmoid")
+                            or (loss_name == "cce" and model["out_act"] == "softmax")
+                        )
+                        grads = backward_mlp([model, cache, grad_out, skip_last_act])
                         if accum_grads is None:
                             accum_grads = grads
                         else:
@@ -943,8 +1081,21 @@ class ModuleRegistry:
                     elif opt_name == "momentum": momentum_step([model, accum_grads, state, lr, 0.9])
                     else: sgd_step([model, accum_grads, lr])
                     epoch_loss += batch_loss
-                    num_batches += 1
-                history.append(epoch_loss / num_batches)
+                mean_loss = epoch_loss / n
+                history.append(mean_loss)
+                if show_progress:
+                    width = 20
+                    current = epoch + 1
+                    filled = int(width * current / epochs)
+                    bar = "█" * filled + "░" * (width - filled)
+                    pct = int(100 * current / epochs)
+                    print(
+                        f"\r[{bar}] {pct}% loss: {mean_loss:.6g}",
+                        end="",
+                        flush=True,
+                    )
+                    if current == epochs:
+                        print()
             return history
 
         return Module("nn", {
@@ -981,6 +1132,7 @@ class ModuleRegistry:
             "summary": Builtin("summary", summary),
             "save": Builtin("save", save),
             "load": Builtin("load", load),
+            "export_pytorch": Builtin("export_pytorch", export_pytorch),
             "predict": Builtin("predict", predict),
             "evaluate": Builtin("evaluate", evaluate),
             "train": Builtin("train", train),

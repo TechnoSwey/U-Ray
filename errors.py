@@ -14,5 +14,9 @@ class ParseError(URayError):
     pass
 
 
+class StaticTypeError(URayError):
+    pass
+
+
 class RuntimeErrorUray(URayError):
     pass

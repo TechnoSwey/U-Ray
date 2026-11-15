@@ -1,0 +1,36 @@
+{
+  "name": "uray-language",
+  "displayName": "U-Ray Language Support",
+  "description": "Syntax highlighting and bracket configuration for U-Ray",
+  "version": "0.1.0",
+  "publisher": "technoswey",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "uray",
+        "aliases": [
+          "U-Ray",
+          "uray"
+        ],
+        "extensions": [
+          ".ur"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "uray",
+        "scopeName": "source.uray",
+        "path": "./syntaxes/uray.tmLanguage.json"
+      }
+    ]
+  }
+}

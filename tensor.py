@@ -1,5 +1,31 @@
 # tensor.py
 
+import importlib
+
+from errors import RuntimeErrorUray
+
+_backend = "python"
+_numpy = None
+
+
+def set_backend(name):
+    """Select the implementation used for tensor math operations."""
+    global _backend, _numpy
+    if name == "python":
+        _backend = "python"
+        _numpy = None
+        return
+    if name != "numpy":
+        raise RuntimeErrorUray(f"Неизвестный backend тензоров {name!r}")
+    try:
+        _numpy = importlib.import_module("numpy")
+    except ImportError as e:
+        raise RuntimeErrorUray(
+            "Backend numpy требует NumPy. Установите его командой: "
+            "python3 -m pip install numpy"
+        ) from e
+    _backend = "numpy"
+
 class Tensor:
     """Тензор без зависимостей. Внутри — вложенные списки float.
     Оптимизирован через встроенные zip/sum."""
@@ -10,8 +36,16 @@ class Tensor:
     @staticmethod
     def _to_float_list(data):
         if isinstance(data, list):
-            return [Tensor._to_float_list(x) for x in data]
-        return float(data)
+            converted = [Tensor._to_float_list(x) for x in data]
+            if converted:
+                child_shape = Tensor._shape_list(converted[0])
+                if any(Tensor._shape_list(x) != child_shape for x in converted[1:]):
+                    raise RuntimeErrorUray("Тензор должен быть прямоугольным")
+            return converted
+        try:
+            return float(data)
+        except (TypeError, ValueError, OverflowError) as e:
+            raise RuntimeErrorUray("Элементы тензора должны быть числами") from e
 
     @property
     def data(self):
@@ -33,11 +67,27 @@ class Tensor:
 
     @staticmethod
     def zeros(shape):
+        Tensor._validate_shape(shape)
+        if _backend == "numpy":
+            return Tensor(_numpy.zeros(shape, dtype=float).tolist())
         return Tensor(Tensor._fill(shape, 0.0))
 
     @staticmethod
     def ones(shape):
+        Tensor._validate_shape(shape)
+        if _backend == "numpy":
+            return Tensor(_numpy.ones(shape, dtype=float).tolist())
         return Tensor(Tensor._fill(shape, 1.0))
+
+    @staticmethod
+    def _validate_shape(shape):
+        if not isinstance(shape, list) or any(
+            not isinstance(dim, int) or isinstance(dim, bool) or dim < 0
+            for dim in shape
+        ):
+            raise RuntimeErrorUray(
+                "Размерности тензора должны быть неотрицательными целыми числами"
+            )
 
     @staticmethod
     def _fill(shape, val):
@@ -46,22 +96,45 @@ class Tensor:
         return [Tensor._fill(shape[1:], val) for _ in range(shape[0])]
 
     def get(self, idx):
-        if isinstance(idx, tuple):
-            cur = self._data
-            for i in idx:
-                cur = cur[i]
-            return cur
-        return self._data[idx]
+        indices = idx if isinstance(idx, tuple) else (idx,)
+        cur = self._data
+        for axis, index in enumerate(indices):
+            if not isinstance(cur, list):
+                raise RuntimeErrorUray("Слишком много индексов для тензора")
+            self._check_index(index, len(cur), axis)
+            cur = cur[index]
+        return cur
 
     def set(self, idx, value):
-        value = float(value)
-        if isinstance(idx, tuple):
-            cur = self._data
-            for i in idx[:-1]:
-                cur = cur[i]
-            cur[idx[-1]] = value
-            return
-        self._data[idx] = value
+        indices = idx if isinstance(idx, tuple) else (idx,)
+        if not indices:
+            raise RuntimeErrorUray("Для присваивания тензору нужен индекс")
+        cur = self._data
+        for axis, index in enumerate(indices):
+            if not isinstance(cur, list):
+                raise RuntimeErrorUray("Слишком много индексов для тензора")
+            self._check_index(index, len(cur), axis)
+            if axis == len(indices) - 1:
+                if isinstance(cur[index], list):
+                    raise RuntimeErrorUray(
+                        "Для присваивания укажите индекс каждого измерения тензора"
+                    )
+                try:
+                    cur[index] = float(value)
+                except (TypeError, ValueError, OverflowError) as e:
+                    raise RuntimeErrorUray("Значение тензора должно быть числом") from e
+                return
+            cur = cur[index]
+
+    @staticmethod
+    def _check_index(index, length, axis):
+        if not isinstance(index, int) or isinstance(index, bool):
+            raise RuntimeErrorUray("Индекс тензора должен быть целым числом")
+        if index < 0 or index >= length:
+            raise RuntimeErrorUray(
+                f"Тензорный индекс {index} вне диапазона измерения {axis} "
+                f"(размер {length})"
+            )
 
     def slice(self, start, end):
         return Tensor(self._data[start:end])
@@ -69,7 +142,29 @@ class Tensor:
     def add(self, other):
         if not isinstance(other, Tensor):
             other = Tensor(other)
+        self._require_same_shape(other, "сложения")
+        if _backend == "numpy":
+            return self._numpy_binary(other, _numpy.add, "сложения")
         return Tensor(Tensor._add(self._data, other._data))
+
+    def _numpy_binary(self, other, operation, label):
+        try:
+            result = operation(
+                _numpy.asarray(self._data, dtype=float),
+                _numpy.asarray(other._data, dtype=float),
+            )
+        except ValueError as e:
+            raise RuntimeErrorUray(
+                f"Несовместимые размерности тензоров для {label}"
+            ) from e
+        return Tensor(result.tolist())
+
+    def _require_same_shape(self, other, label):
+        if self.shape() != other.shape():
+            raise RuntimeErrorUray(
+                f"Несовместимые размерности тензоров для {label}: "
+                f"{self.shape()} и {other.shape()}"
+            )
 
     @staticmethod
     def _add(a, b):
@@ -80,6 +175,9 @@ class Tensor:
     def sub(self, other):
         if not isinstance(other, Tensor):
             other = Tensor(other)
+        self._require_same_shape(other, "вычитания")
+        if _backend == "numpy":
+            return self._numpy_binary(other, _numpy.subtract, "вычитания")
         return Tensor(Tensor._sub(self._data, other._data))
 
     @staticmethod
@@ -91,6 +189,9 @@ class Tensor:
     def mul(self, other):
         if not isinstance(other, Tensor):
             other = Tensor(other)
+        self._require_same_shape(other, "умножения")
+        if _backend == "numpy":
+            return self._numpy_binary(other, _numpy.multiply, "умножения")
         return Tensor(Tensor._mul(self._data, other._data))
 
     @staticmethod
@@ -102,6 +203,26 @@ class Tensor:
     def matmul(self, other):
         if not isinstance(other, Tensor):
             other = Tensor(other)
+        left_shape = self.shape()
+        right_shape = other.shape()
+        if len(left_shape) != 2 or len(right_shape) != 2:
+            raise RuntimeErrorUray("matmul ожидает два двумерных тензора")
+        if left_shape[1] != right_shape[0]:
+            raise RuntimeErrorUray(
+                f"Несовместимые размерности для matmul: "
+                f"{left_shape} и {right_shape}"
+            )
+        if _backend == "numpy":
+            try:
+                result = _numpy.matmul(
+                    _numpy.asarray(self._data, dtype=float),
+                    _numpy.asarray(other._data, dtype=float),
+                )
+            except ValueError as e:
+                raise RuntimeErrorUray(
+                    f"Несовместимые размерности тензоров для matmul: {e}"
+                ) from e
+            return Tensor(result.tolist())
         return Tensor(Tensor._matmul(self._data, other._data))
 
     @staticmethod
@@ -116,9 +237,19 @@ class Tensor:
         return result
 
     def T(self):
+        if len(self.shape()) != 2:
+            raise RuntimeErrorUray("Транспонирование ожидает матрицу")
+        if _backend == "numpy":
+            return Tensor(
+                _numpy.transpose(_numpy.asarray(self._data, dtype=float)).tolist()
+            )
         return Tensor(list(map(list, zip(*self._data))))
 
     def scalar_mul(self, s):
+        if _backend == "numpy":
+            return Tensor(
+                (_numpy.asarray(self._data, dtype=float) * s).tolist()
+            )
         return Tensor(Tensor._scalar_mul(self._data, s))
 
     @staticmethod
@@ -128,6 +259,10 @@ class Tensor:
         return a * s
 
     def scalar_add(self, s):
+        if _backend == "numpy":
+            return Tensor(
+                (_numpy.asarray(self._data, dtype=float) + s).tolist()
+            )
         return Tensor(Tensor._scalar_add(self._data, s))
 
     @staticmethod
@@ -148,9 +283,20 @@ class Tensor:
     def outer(self, other):
         if not isinstance(other, Tensor):
             other = Tensor(other)
+        if len(self.shape()) != 1 or len(other.shape()) != 1:
+            raise RuntimeErrorUray("outer ожидает два вектора")
+        if _backend == "numpy":
+            return Tensor(
+                _numpy.outer(
+                    _numpy.asarray(self._data, dtype=float),
+                    _numpy.asarray(other._data, dtype=float),
+                ).tolist()
+            )
         return Tensor([[x * y for y in other._data] for x in self._data])
 
     def sum(self):
+        if _backend == "numpy":
+            return float(_numpy.sum(_numpy.asarray(self._data, dtype=float)))
         return Tensor._sum(self._data)
 
     @staticmethod
@@ -160,6 +306,13 @@ class Tensor:
         return a
 
     def max(self):
+        if any(dim == 0 for dim in self.shape()):
+            raise RuntimeErrorUray("max от пустого тензора")
+        if _backend == "numpy":
+            try:
+                return float(_numpy.max(_numpy.asarray(self._data, dtype=float)))
+            except ValueError as e:
+                raise RuntimeErrorUray("max от пустого тензора") from e
         return Tensor._max(self._data)
 
     @staticmethod

@@ -161,6 +161,25 @@ model = nn.mlp([2, 16, 16, 3], "leaky_relu", "softmax")     // многокла�
 model = nn.mlp([2, 16, 1], "leaky_relu", "linear")          // регрессия
 ```
 
+Перед исполнением U-Ray статически проверяет размерности, которые можно
+вывести из литералов и известных переменных. Например, если `nn.dense(2, 4)`
+передаёт вектор длины 4 в `nn.dense(5, 1)`, файл завершится ошибкой проверки
+до выполнения первой инструкции. Для `nn.mlp` также проверяются известные
+ширины `X` и `Y` в `nn.train` и `nn.evaluate`.
+
+```uray
+import nn
+
+first = nn.dense(2, 4)
+second = nn.dense(5, 1)
+hidden = nn.forward(first, [0.0, 1.0])
+output = nn.forward(second, hidden) // ошибка: слой ожидает 5, получено 4
+```
+
+Для отдельной проверки без запуска программы выполни `./uray check file.ur`.
+Размерности, зависящие от пользовательского ввода или динамических вычислений,
+остаются под runtime-проверками.
+
 nn.forward_mlp(model, x)
 
 Прямой проход всей сети. Возвращает cache:
@@ -188,6 +207,22 @@ nn.summary(model)
 nn.rand_seed(seed)
 
 Фиксирует random seed. Влияет на math.rand и инициализацию весов в nn.mlp/nn.dense.
+
+nn.train(model, X, Y, epochs, lr[, batch_size, loss, optimizer, show_progress])
+
+Обучает модель мини-батчами и возвращает средний loss по каждой эпохе.
+Оптимизаторы: `"sgd"`, `"momentum"` и `"adam"`; функции потерь: `"mse"`,
+`"bce"` и `"cce"`.
+
+Последний аргумент `show_progress` необязателен и по умолчанию равен `false`.
+Если передать `true`, U-Ray выводит прогресс-бар и средний loss после каждой
+эпохи:
+
+```
+history = nn.train(model, X, Y, 100, 0.01, 32, "bce", "adam", true)
+```
+
+`nn.evaluate(model, X, Y, loss)` возвращает `[средний_loss, accuracy]`.
 
 ---
 
@@ -243,6 +278,19 @@ nn.load(path)
 ```
 loaded = nn.load("xor_model.json")
 ```
+
+`nn.export_pytorch(model, path)` экспортирует модель в PyTorch checkpoint `.pt`.
+Требуется необязательная зависимость PyTorch:
+
+```
+nn.export_pytorch(model, "model.pt")
+```
+
+Checkpoint содержит размеры слоёв, активации и `state_dict` с ключами
+`layers.N.weight` и `layers.N.bias` в стандартной для `torch.nn.Linear` форме.
+Чтобы загрузить его, создайте PyTorch-модуль с `torch.nn.ModuleList` слоёв
+`layers`, затем вызовите `load_state_dict(checkpoint["state_dict"])`.
+U-Ray не загружает `.pt` обратно; состояние оптимизатора также не экспортируется.
 
 ---
 

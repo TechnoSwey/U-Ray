@@ -202,6 +202,8 @@ def _format_repr_impl(v, seen, depth):
             ) + "]"
         finally:
             seen.discard(vid)
+    if isinstance(v, Builtin):
+        return f"<builtin {v.name}>"
     if isinstance(v, Module):
         return f"<module {v.name}>"
     if isinstance(v, Function):

@@ -14,6 +14,9 @@ lexer.py       → список токенов
 parser.py      → AST (дерево)
    │
    ▼
+typechecker.py → проверка известных форм тензоров
+   │
+   ▼
 interpreter.py → выполнение
 ```
 
@@ -25,6 +28,9 @@ values.py Типы значений (DictValue, Builtin, Module, Function), deep
 lexer.py Текст → токены. Позиции (строка:колонка) у каждого токена
 ast_nodes.py Узлы AST: Program, Assign, Print, If, While, For, FuncDecl, Return, Call, BinOp, UnaryOp, ListLit, DictLit, Index, Attr, ...
 parser.py Токены → AST. Рекурсивный спуск, приоритеты, проверка break/continue вне цикла
+typechecker.py Консервативно проверяет известные размерности MLP и dense-проходов до исполнения
+formatter.py Проверяет синтаксис и форматирует код, сохраняя комментарии
+repl_completion.py Подсказки для имён, модулей, словарей и структур в REPL
 modules.py Модули math, linalg, nn. Все built-in функции
 interpreter.py Обход AST, среда (Env), вызовы функций, apply_binop
 main.py Точка входа: читает файл, ставит URAY_BASE_DIR, ловит URayError

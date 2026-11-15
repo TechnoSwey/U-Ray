@@ -13,7 +13,8 @@ from ast_nodes import (
     Program, Import, Assign, Del, Print, Number, Str, Var, BinOp,
     If, While, For, Break, Continue, FuncDecl, MethodDecl, Lambda, Return, Block, Bool, Call,
     ListLit, DictLit, Index, Attr, UnaryOp, TupleLit,
-    Try, Throw, Match, TypeDecl, Slice, Ternary
+    Try, Throw, Match, TypeDecl, Slice, Ternary,
+    StructPattern, BindPattern, WildcardPattern, ExprStmt
 )
 import values
 
@@ -447,6 +448,9 @@ class Interpreter:
             self.exec_statement(stmt)
 
     def exec_statement(self, node):
+        if isinstance(node, ExprStmt):
+            return self.eval_expr(node.expr)
+
         if isinstance(node, Import):
             if node.path is not None:
                 self._import_file(node.path)
@@ -561,9 +565,16 @@ class Interpreter:
             value = self.eval_expr(node.expr)
             matched = False
             for pattern, block in node.cases:
-                pattern_value = self.eval_expr(pattern)
-                if deep_equal(value, pattern_value):
-                    self.exec_block(block)
+                bindings = {}
+                if self._match_pattern(pattern, value, bindings):
+                    saved_env = self.env
+                    self.env = Env(parent=saved_env)
+                    for name, bound_value in bindings.items():
+                        self.env.set(name, bound_value)
+                    try:
+                        self.exec_block(block)
+                    finally:
+                        self.env = saved_env
                     matched = True
                     break
             if not matched and node.default_block is not None:
@@ -572,6 +583,38 @@ class Interpreter:
 
         self.eval_expr(node)
         return
+
+    def _match_pattern(self, pattern, value, bindings):
+        if isinstance(pattern, WildcardPattern):
+            return True
+        if isinstance(pattern, BindPattern):
+            if pattern.name in bindings:
+                return deep_equal(bindings[pattern.name], value)
+            bindings[pattern.name] = value
+            return True
+        if isinstance(pattern, StructPattern):
+            if not isinstance(value, StructInstance) \
+                    or value.type_name != pattern.type_name:
+                return False
+            if pattern.named:
+                for field_name, subpattern in pattern.fields:
+                    if field_name not in value.fields:
+                        return False
+                    if not self._match_pattern(
+                        subpattern, value.fields[field_name], bindings
+                    ):
+                        return False
+                return True
+            field_names = value.fields.keys()
+            if len(pattern.fields) != len(field_names):
+                return False
+            for subpattern, field_name in zip(pattern.fields, field_names):
+                if not self._match_pattern(
+                    subpattern, value.fields[field_name], bindings
+                ):
+                    return False
+            return True
+        return deep_equal(value, self.eval_expr(pattern))
 
     def _import_file(self, rel_path):
         base = values.URAY_BASE_DIR
@@ -588,6 +631,8 @@ class Interpreter:
 
         from parser import parse
         program = parse(src)
+        from typechecker import StaticChecker
+        StaticChecker().check(program)
         sub = Interpreter(loaded_files=self.loaded_files | {full})
         sub.run(program)
         for name, val in sub.globals.vars.items():

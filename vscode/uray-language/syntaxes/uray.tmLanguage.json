@@ -1,0 +1,107 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "U-Ray",
+  "scopeName": "source.uray",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#numbers" },
+    { "include": "#declarations" },
+    { "include": "#keywords" },
+    { "include": "#constants" },
+    { "include": "#modules" },
+    { "include": "#functions" },
+    { "include": "#operators" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.double-slash.uray",
+          "match": "//.*$"
+        }
+      ]
+    },
+    "strings": {
+      "name": "string.quoted.double.uray",
+      "begin": "\"",
+      "end": "\"",
+      "patterns": [
+        {
+          "name": "constant.character.escape.uray",
+          "match": "\\\\(?:[ntr\"\\\\])"
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.float.uray",
+          "match": "\\b[0-9]+\\.[0-9]+\\b"
+        },
+        {
+          "name": "constant.numeric.integer.uray",
+          "match": "\\b[0-9]+\\b"
+        }
+      ]
+    },
+    "declarations": {
+      "patterns": [
+        {
+          "name": "storage.type.uray",
+          "match": "\\btype\\b"
+        },
+        {
+          "name": "storage.type.function.uray",
+          "begin": "\\bfunc\\s+",
+          "beginCaptures": {
+            "0": { "name": "storage.type.function.uray" }
+          },
+          "end": "(?=\\()",
+          "patterns": [
+            {
+              "name": "entity.name.function.uray",
+              "match": "[A-Za-z_][A-Za-z0-9_]*"
+            }
+          ]
+        },
+        {
+          "name": "entity.name.type.uray",
+          "match": "\\b(?<=type\\s)[A-Za-z_][A-Za-z0-9_]*\\b"
+        }
+      ]
+    },
+    "keywords": {
+      "name": "keyword.control.uray",
+      "match": "\\b(?:if|else|while|for|in|break|continue|func|return|import|del|try|catch|throw|match|type|print)\\b"
+    },
+    "constants": {
+      "name": "constant.language.uray",
+      "match": "\\b(?:true|false)\\b|(?<![A-Za-z0-9_])_(?![A-Za-z0-9_])"
+    },
+    "modules": {
+      "name": "support.module.uray",
+      "match": "\\b(?:math|linalg|nn)\\b"
+    },
+    "functions": {
+      "patterns": [
+        {
+          "name": "support.function.builtin.uray",
+          "match": "\\b(?:len|push|pop|str|range|keys|has|copy|enumerate|zip|upper|lower|split|strip|replace|join|find|slice|zeros|ones|shape|map|filter|reduce|progress)\\b(?=\\s*\\()"
+        },
+        {
+          "name": "support.function.nn.uray",
+          "match": "(?<=nn\\.)[A-Za-z_][A-Za-z0-9_]*(?=\\s*\\()"
+        },
+        {
+          "name": "entity.name.function.call.uray",
+          "match": "\\b[A-Za-z_][A-Za-z0-9_]*\\b(?=\\s*\\()"
+        }
+      ]
+    },
+    "operators": {
+      "name": "keyword.operator.uray",
+      "match": "==|!=|<=|>=|\\*\\*|[=+*/%<>-]"
+    }
+  }
+}
