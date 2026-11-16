@@ -12,7 +12,7 @@ ML-модуль U-Ray
 6. nn: backprop-примитивы
 7. nn: high-level API
 8. nn: autodiff и составляемые слои
-9. nn: загрузка MNIST
+9. nn: загрузка наборов данных
 10. nn: оптимизаторы
 11. nn: сохранение моделей
 12. Контракт skip_last_act
@@ -362,10 +362,58 @@ python3 examples/download_mnist.py
 
 ---
 
-nn: загрузка MNIST
+nn: загрузка наборов данных
 
 `nn.load_mnist(directory)` читает стандартные IDX-файлы MNIST — сжатые `.gz`
-или уже распакованные:
+или уже распакованные. Второй аргумент включает скачивание недостающих
+архивов с официально используемого зеркала:
+
+```
+data = nn.load_mnist("data/mnist", true)
+```
+
+Можно вызвать `nn.download_mnist(directory)`, чтобы скачать и проверить MNIST
+отдельно от обучения. Загрузка атомарная: незавершённый файл не подменит архив,
+а скачанный набор проверяется по заголовкам IDX и ожидаемым размерам выборок.
+При стандартном вызове без `true` загрузчик работает офлайн и только читает
+файлы из каталога.
+
+`nn.load_csv(path, label_column[, test_ratio[, seed[, normalize[, one_hot[, header]]]]])`
+загружает таблицу с числовыми признаками и создаёт воспроизводимые выборки
+train/test. `label_column` — имя столбца при заголовке или индекс столбца
+(индексы могут быть отрицательными). По умолчанию заголовок включён,
+`test_ratio=0.2`, `seed=42`, нормализация и one-hot выключены. При
+`normalize=true` признаки масштабируются по минимуму и максимуму train-части;
+при `one_hot=true` строковые или числовые метки классов кодируются векторы
+one-hot. Без one-hot метки должны быть числовыми и возвращаются как скалярные
+векторы, что подходит для регрессии.
+
+Результат содержит `train` и `test` с полями `"X"`, `"Y"` и `"count"`, а также
+`"features"`, `"classes"` и, если есть заголовок, `"feature_names"`.
+Обычные списки можно сразу передавать в `nn.train`, `nn.evaluate` и
+`nn.predict`.
+
+```
+import nn
+
+data = nn.load_csv(
+    "examples/tabular_classification.csv",
+    "class",
+    0.2,
+    42,
+    true,
+    true,
+    true
+)
+model = nn.mlp([data["features"], 16, len(data["classes"])], "relu", "softmax")
+history = nn.train(
+    model, data["train"]["X"], data["train"]["Y"],
+    20, 0.001, 16, "cce", "adam"
+)
+metrics = nn.evaluate(model, data["test"]["X"], data["test"]["Y"], "cce")
+```
+
+Для MNIST каталог содержит четыре стандартных файла:
 
 ```
 train-images-idx3-ubyte.gz
@@ -374,7 +422,7 @@ t10k-images-idx3-ubyte.gz
 t10k-labels-idx1-ubyte.gz
 ```
 
-Результат — словарь `{"train": split, "test": split}`. В каждом `split` доступны
+Результат `nn.load_mnist` — словарь `{"train": split, "test": split}`. В каждом `split` доступны
 `"X"` (изображения), `"Y"` (метки one-hot), `"count"`, `"rows"` и `"columns"`.
 Изображения хранятся компактно и нормализуются в диапазон `[0, 1]` по мере
 обработки мини-батчей, а не копируются целиком в Python-списки.

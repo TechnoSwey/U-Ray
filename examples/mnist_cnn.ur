@@ -2,7 +2,7 @@ import nn
 
 // Сверточная классификация MNIST: Conv2D -> ReLU -> MaxPool -> Dense.
 // Запускайте с --backend=numpy для эффективного обучения полного датасета.
-data = nn.load_mnist("data/mnist")
+data = nn.load_mnist("data/mnist", true)
 train = data["train"]
 test = data["test"]
 

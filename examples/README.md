@@ -10,6 +10,7 @@
 | [`train_batch_example.ur`](train_batch_example.ur) | Создаёт синтетические данные, обучает MLP батчами с Adam и выводит метрики | `./uray examples/train_batch_example.ur` |
 | [`mnist.ur`](mnist.ur) | Загружает исходные IDX-архивы, обучает классификатор цифр, оценивает его и сохраняет модель | `python3 examples/download_mnist.py && ./uray examples/mnist.ur --backend=numpy` |
 | [`mnist_cnn.ur`](mnist_cnn.ur) | Обучает сверточную MNIST-модель на компонуемых слоях и autodiff | `python3 examples/download_mnist.py && ./uray examples/mnist_cnn.ur --backend=numpy` |
+| [`tabular_classification.ur`](tabular_classification.ur) | Читает CSV, делит данные на train/test, нормализует признаки и обучает классификатор | `./uray examples/tabular_classification.ur` |
 | [`residual_regularization.ur`](residual_regularization.ur) | Обучает классификатор с BatchNorm, Dropout и residual-ветвью | `./uray examples/residual_regularization.ur` |
 | [`transformer_sequence.ur`](transformer_sequence.ur) | Обучает последовательностную модель с Transformer-блоком и causal attention | `./uray examples/transformer_sequence.ur` |
 | [`progress.ur`](progress.ur) | Показывает прогресс обучения и текущий loss по эпохам | `./uray examples/progress.ur` |

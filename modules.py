@@ -11,6 +11,7 @@ from values import DictValue, Builtin, Module, Function
 from tensor import Tensor, get_numpy
 from autograd import GradTensor, as_grad_tensor
 from mnist import MNISTView, load_mnist_directory
+from datasets import download_mnist_directory, load_csv_dataset
 
 
 class ModuleRegistry:
@@ -1918,11 +1919,26 @@ class ModuleRegistry:
             if loss_name == "cce": return cce_grad([yhat, y])
             raise R(f"nn.train: неизвестная функция потерь {loss_name!r}")
 
+        def _to_dict_value(value):
+            if isinstance(value, dict):
+                result = DictValue()
+                for key, item in value.items():
+                    result[key] = _to_dict_value(item)
+                return result
+            if isinstance(value, list):
+                return [_to_dict_value(item) for item in value]
+            return value
+
         def load_mnist(args):
-            if len(args) != 1 or not isinstance(args[0], str):
-                raise R("nn.load_mnist ожидает путь к каталогу MNIST")
+            if (len(args) not in (1, 2)
+                    or not isinstance(args[0], str)
+                    or (len(args) == 2 and not isinstance(args[1], bool))):
+                raise R("nn.load_mnist ожидает путь и необязательный download=true/false")
             try:
-                splits = load_mnist_directory(_resolve_path(args[0]))
+                if len(args) == 2 and args[1]:
+                    splits = download_mnist_directory(_resolve_path(args[0]))
+                else:
+                    splits = load_mnist_directory(_resolve_path(args[0]))
             except (OSError, ValueError) as error:
                 raise R(f"nn.load_mnist: {error}")
 
@@ -1936,6 +1952,48 @@ class ModuleRegistry:
                 split["columns"] = storage.columns
                 result[name] = split
             return result
+
+        def download_mnist(args):
+            if len(args) != 1 or not isinstance(args[0], str):
+                raise R("nn.download_mnist ожидает путь к каталогу")
+            try:
+                splits = download_mnist_directory(_resolve_path(args[0]))
+            except (OSError, ValueError) as error:
+                raise R(f"nn.download_mnist: {error}")
+            result = DictValue()
+            for name, storage in splits.items():
+                split = DictValue()
+                split["X"] = MNISTView(storage, "images")
+                split["Y"] = MNISTView(storage, "labels")
+                split["count"] = storage.count
+                split["rows"] = storage.rows
+                split["columns"] = storage.columns
+                result[name] = split
+            return result
+
+        def load_csv(args):
+            if len(args) < 2 or len(args) > 7:
+                raise R(
+                    "nn.load_csv ожидает path, label_column и необязательные "
+                    "test_ratio, seed, normalize, one_hot, header"
+                )
+            if not isinstance(args[0], str):
+                raise R("nn.load_csv: path должен быть строкой")
+            options = [0.2, 42, False, False, True]
+            options[:len(args) - 2] = args[2:]
+            try:
+                data = load_csv_dataset(
+                    _resolve_path(args[0]),
+                    args[1],
+                    options[0],
+                    options[1],
+                    options[2],
+                    options[3],
+                    options[4],
+                )
+            except (OSError, ValueError) as error:
+                raise R(f"nn.load_csv: {error}")
+            return _to_dict_value(data)
 
         def _dataset_length(data, operation):
             if isinstance(data, (list, MNISTView)):
@@ -2557,6 +2615,8 @@ class ModuleRegistry:
             "save": Builtin("save", save),
             "load": Builtin("load", load),
             "load_mnist": Builtin("load_mnist", load_mnist),
+            "download_mnist": Builtin("download_mnist", download_mnist),
+            "load_csv": Builtin("load_csv", load_csv),
             "export_pytorch": Builtin("export_pytorch", export_pytorch),
             "predict": Builtin("predict", predict),
             "sample": Builtin("sample", sample),

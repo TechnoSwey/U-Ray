@@ -60,9 +60,9 @@ python3 main.py examples/save_load.ur
 ./uray --version
 ./uray --repl
 ./uray examples/numpy_backend.ur --backend=numpy
-python3 examples/download_mnist.py
 ./uray examples/mnist.ur --backend=numpy
 ./uray examples/mnist_cnn.ur --backend=numpy
+./uray examples/tabular_classification.ur
 ./uray check examples/mlp_xor.ur
 ./uray fmt examples/mlp_xor.ur
 ./uray fmt --write examples/mlp_xor.ur
@@ -72,10 +72,13 @@ python3 examples/download_mnist.py
 сторонних библиотек; `--backend=numpy` ускоряет тензорные операции, если
 установлен NumPy (`python3 -m pip install numpy`); для MLP он также включает
 векторизованное обучение мини-батчами, а общий autodiff backend ускоряет
-матричные операции и свёртки. `nn.load_mnist("data/mnist")` читает
-полный датасет из стандартных IDX-файлов, не разворачивая изображения в
-огромные Python-списки. Скрипт `examples/download_mnist.py` скачивает архивы,
-а `examples/mnist.ur` и `examples/mnist_cnn.ur` показывают обучение MLP и CNN.
+матричные операции и свёртки. `nn.load_mnist("data/mnist", true)` скачивает
+недостающие стандартные архивы, проверяет IDX-структуру и возвращает train/test
+без разворачивания всех изображений в Python-списки. `nn.load_csv(...)`
+загружает числовые признаки из CSV, воспроизводимо делит данные на train/test,
+по запросу нормализует их и кодирует категориальные метки one-hot. Примеры
+`mnist.ur`, `mnist_cnn.ur` и `tabular_classification.ur` показывают загрузку,
+обучение и оценку моделей.
 В интерактивном режиме Tab дополняет имена переменных, встроенные функции,
 модули и поля структур на платформах с Python `readline`.
 
@@ -143,6 +146,7 @@ print("accuracy:", metrics[1])
 | [`train_batch_example.ur`](examples/train_batch_example.ur) | Синтетические данные, MLP и пакетное обучение с Adam |
 | [`mnist.ur`](examples/mnist.ur) | Загружает полный MNIST, обучает классификатор, оценивает его и сохраняет модель |
 | [`mnist_cnn.ur`](examples/mnist_cnn.ur) | Обучает сверточную модель через общий autodiff и сохраняет её |
+| [`tabular_classification.ur`](examples/tabular_classification.ur) | Загружает CSV и обучает классификатор с train/test оценкой |
 | [`residual_regularization.ur`](examples/residual_regularization.ur) | Показывает BatchNorm, Dropout и обучаемую residual-ветвь |
 | [`transformer_sequence.ur`](examples/transformer_sequence.ur) | Обучает Transformer-блок с multi-head causal self-attention |
 | [`progress.ur`](examples/progress.ur) | Показывает прогресс обучения и текущий loss после каждой эпохи |

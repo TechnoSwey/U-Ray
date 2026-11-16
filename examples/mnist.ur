@@ -2,7 +2,7 @@ import nn
 
 // Скачай датасет командой:
 // python3 examples/download_mnist.py
-data = nn.load_mnist("data/mnist")
+data = nn.load_mnist("data/mnist", true)
 train = data["train"]
 test = data["test"]
 
