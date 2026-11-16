@@ -238,7 +238,7 @@ def _matmul(left, right):
             [[value] for value in right]
             if len(right_shape) == 1 else right
         )
-        result = native.matmul(left_matrix, right_matrix)
+        result = native.matmul(left_matrix, right_matrix, validated=True)
         if len(left_shape) == 1 and len(right_shape) == 1:
             return result[0][0]
         if len(right_shape) == 1:
@@ -1034,6 +1034,65 @@ class GradTensor(Tensor):
                 return tuple(result)
         if squeeze_batch:
             output_data = output_data[0]
+        return self._result_owned(output_data, parents, backward)
+
+    def conv2d_relu_max_pool2d(
+        self, weight, bias, stride, padding, pool_kernel, pool_stride
+    ):
+        """Fuse the native Conv2D -> ReLU -> MaxPool sequence."""
+        native = get_native()
+        if native is None or get_numpy() is not None:
+            return (
+                self.conv2d(weight, bias, stride, padding)
+                .relu()
+                .max_pool2d(pool_kernel, pool_stride)
+            )
+
+        weight = as_grad_tensor(weight)
+        bias_tensor = as_grad_tensor(bias) if bias is not None else None
+        x_shape = self.shape()
+        weight_shape = weight.shape()
+        if len(x_shape) == 3:
+            return (
+                self.conv2d(weight, bias_tensor, stride, padding)
+                .relu()
+                .max_pool2d(pool_kernel, pool_stride)
+            )
+        if len(x_shape) != 4 or len(weight_shape) != 4:
+            raise RuntimeErrorUray(
+                "Слияние conv-ReLU-pool ожидает NCHW-вход и OIHW-веса"
+            )
+        if (
+            not isinstance(stride, int) or isinstance(stride, bool) or stride <= 0
+            or not isinstance(padding, int) or isinstance(padding, bool) or padding < 0
+        ):
+            raise RuntimeErrorUray("conv2d: stride должен быть >0, padding >=0")
+        if (
+            not isinstance(pool_kernel, int) or isinstance(pool_kernel, bool)
+            or pool_kernel <= 0
+            or not isinstance(pool_stride, int) or isinstance(pool_stride, bool)
+            or pool_stride <= 0
+        ):
+            raise RuntimeErrorUray(
+                "max_pool2d: kernel и stride должны быть >0"
+            )
+        if x_shape[1] != weight_shape[1]:
+            raise RuntimeErrorUray("conv2d: число входных каналов не совпадает с весами")
+        if bias_tensor is not None and bias_tensor.shape() != [weight_shape[0]]:
+            raise RuntimeErrorUray("conv2d: bias должен иметь форму [out_channels]")
+
+        output_data, context = native.conv2d_relu_max_pool2d_forward(
+            self.data, weight.data,
+            bias_tensor.data if bias_tensor is not None else None,
+            stride, padding, pool_kernel, pool_stride,
+        )
+        parents = (self, weight) + ((bias_tensor,) if bias_tensor is not None else ())
+
+        def backward(gradient):
+            return native.conv2d_relu_max_pool2d_backward(
+                context, gradient, bias_tensor is not None
+            )
+
         return self._result_owned(output_data, parents, backward)
 
     def max_pool2d(self, kernel_size=2, stride=None):

@@ -199,18 +199,30 @@ void uray_matmul(
     }
 #if URAY_X86_GNU
     __builtin_cpu_init();
-    if (__builtin_cpu_supports("avx512f") &&
+    if (n >= 16 && __builtin_cpu_supports("avx512f") &&
         __builtin_cpu_supports("fma")) {
         gemm_avx512(m, k, n, a, b, c);
         return;
     }
-    if (__builtin_cpu_supports("avx2") &&
+    if (n >= 8 && __builtin_cpu_supports("avx2") &&
         __builtin_cpu_supports("fma")) {
         gemm_avx2(m, k, n, a, b, c);
         return;
     }
 #endif
     gemm_scalar(m, k, n, a, b, c);
+}
+
+int uray_all_finite(size_t count, const double *values) {
+    if (count != 0 && values == NULL) {
+        return 0;
+    }
+    for (size_t index = 0; index < count; ++index) {
+        if (!isfinite(values[index])) {
+            return 0;
+        }
+    }
+    return 1;
 }
 
 static size_t sum_weights(const int *dims, size_t layers) {

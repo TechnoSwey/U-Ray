@@ -572,10 +572,33 @@ class ModuleRegistry:
             return output.mul(as_grad_tensor(make_mask(output.data)))
 
         def _forward_layer_list(layers, output, training):
-            for layer in layers:
+            skip_until = 0
+            for index, layer in enumerate(layers):
+                if index < skip_until:
+                    continue
                 if not isinstance(layer, DictValue) or "kind" not in layer:
                     raise R("nn.forward_layers: каждый элемент должен быть слоем")
                 kind = layer["kind"]
+                if (
+                    kind == "conv2d"
+                    and get_native() is not None
+                    and index + 2 < len(layers)
+                    and isinstance(layers[index + 1], DictValue)
+                    and "kind" in layers[index + 1]
+                    and layers[index + 1]["kind"] == "activation"
+                    and "name" in layers[index + 1]
+                    and layers[index + 1]["name"] == "relu"
+                    and isinstance(layers[index + 2], DictValue)
+                    and "kind" in layers[index + 2]
+                    and layers[index + 2]["kind"] == "max_pool2d"
+                ):
+                    pool = layers[index + 2]
+                    output = output.conv2d_relu_max_pool2d(
+                        layer["W"], layer["b"], layer["stride"],
+                        layer["padding"], pool["kernel"], pool["stride"],
+                    )
+                    skip_until = index + 3
+                    continue
                 if kind == "linear":
                     weights = layer["W"]
                     if len(output.shape()) == 1:

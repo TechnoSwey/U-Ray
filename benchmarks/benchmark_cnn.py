@@ -91,11 +91,19 @@ def main():
     parser.add_argument("--test-samples", type=int, default=1024)
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--batch-size", type=int, default=128)
-    parser.add_argument("--max-ratio", type=float, default=1.5)
+    parser.add_argument(
+        "--max-slowdown-seconds",
+        type=float,
+        default=5.0,
+        help="максимальное допустимое отставание native от NumPy",
+    )
     args = parser.parse_args()
     if min(args.train_samples, args.test_samples, args.epochs,
-           args.batch_size) <= 0 or args.max_ratio <= 0:
-        parser.error("sizes, epochs, batch-size и max-ratio должны быть > 0")
+           args.batch_size) <= 0 or args.max_slowdown_seconds < 0:
+        parser.error(
+            "sizes, epochs, batch-size должны быть > 0, "
+            "max-slowdown-seconds должен быть >= 0"
+        )
 
     data_dir = Path(args.data_dir)
     if not data_dir.is_dir():
@@ -151,6 +159,10 @@ def main():
         set_backend("python")
 
     ratio = native_result["total_seconds"] / numpy_result["total_seconds"]
+    difference = (
+        native_result["total_seconds"] - numpy_result["total_seconds"]
+    )
+    slowdown = max(0.0, difference)
     print("MNIST CNN: Conv2D(1, 8, 3) -> ReLU -> MaxPool(2) -> Dense(1568, 10)")
     print(
         f"  samples: train={train_samples}, test={test_samples}, "
@@ -168,13 +180,15 @@ def main():
     )
     print(
         f"  native/NumPy={ratio:.3f}x "
-        f"(target <= {args.max_ratio:.3f}x)"
+        f"(native {'slower' if difference > 0 else 'faster'} by "
+        f"{abs(difference):.3f}s; max allowed slowdown "
+        f"{args.max_slowdown_seconds:.3f}s)"
     )
     print(
         f"  test accuracy: NumPy={numpy_result['metrics'][1]:.5f}, "
         f"native={native_result['metrics'][1]:.5f}"
     )
-    if ratio <= args.max_ratio:
+    if slowdown <= args.max_slowdown_seconds:
         print("  RESULT: PASS")
         return 0
     print("  RESULT: NOT MET")

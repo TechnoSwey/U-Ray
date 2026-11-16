@@ -598,6 +598,56 @@ class AutogradTests(unittest.TestCase):
             ):
                 self.assertAlmostEqual(left, right, places=10)
 
+    def test_native_fused_conv_relu_pool_matches_separate_operations(self):
+        try:
+            set_backend("native")
+        except RuntimeErrorUray as error:
+            self.skipTest(str(error))
+
+        source = [
+            [
+                [
+                    [-1.0, 0.5, 2.0, -0.5],
+                    [1.5, -2.0, 0.25, 3.0],
+                    [0.0, 1.0, -1.5, 0.75],
+                    [2.5, -0.25, 1.25, -3.0],
+                ]
+            ],
+            [
+                [
+                    [0.5, -1.0, 1.5, 2.0],
+                    [-0.5, 2.5, -2.0, 1.0],
+                    [3.0, -1.5, 0.25, -0.75],
+                    [1.25, 0.0, -0.25, 2.0],
+                ]
+            ],
+        ]
+        weights = [[[[0.25, -0.5, 0.75], [1.0, -1.25, 0.5], [-0.75, 0.25, 1.5]]]]
+        biases = [0.1]
+
+        fused_input = GradTensor(copy.deepcopy(source), requires_grad=True)
+        fused_weights = GradTensor(copy.deepcopy(weights), requires_grad=True)
+        fused_bias = GradTensor(list(biases), requires_grad=True)
+        fused = fused_input.conv2d_relu_max_pool2d(
+            fused_weights, fused_bias, 1, 1, 2, 2
+        )
+        fused.sum_all().backward()
+
+        plain_input = GradTensor(copy.deepcopy(source), requires_grad=True)
+        plain_weights = GradTensor(copy.deepcopy(weights), requires_grad=True)
+        plain_bias = GradTensor(list(biases), requires_grad=True)
+        plain = (
+            plain_input.conv2d(plain_weights, plain_bias, 1, 1)
+            .relu()
+            .max_pool2d(2, 2)
+        )
+        plain.sum_all().backward()
+
+        self.assertEqual(fused.data, plain.data)
+        self.assertEqual(fused_input.grad, plain_input.grad)
+        self.assertEqual(fused_weights.grad, plain_weights.grad)
+        self.assertEqual(fused_bias.grad, plain_bias.grad)
+
     def test_native_max_pool_matches_python_with_overlapping_windows(self):
         values = [[[[1.0, 9.0, 3.0], [4.0, 9.0, 6.0], [7.0, 8.0, 5.0]]]]
         outputs = []

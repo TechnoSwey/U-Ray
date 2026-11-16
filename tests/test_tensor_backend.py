@@ -61,6 +61,16 @@ class TensorBackendTests(unittest.TestCase):
             for actual, expected_value in zip(row, expected_row):
                 self.assertAlmostEqual(actual, expected_value, places=10)
 
+    def test_native_matmul_rejects_non_finite_tensor_values(self):
+        try:
+            set_backend("native")
+        except RuntimeErrorUray as error:
+            self.skipTest(str(error))
+        left = Tensor([[float("nan")]])
+        right = Tensor([[1.0]])
+        with self.assertRaisesRegex(RuntimeErrorUray, "конечными числами"):
+            left.matmul(right)
+
     def test_native_backend_does_not_import_numpy(self):
         try:
             set_backend("native")
