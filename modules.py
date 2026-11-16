@@ -438,6 +438,90 @@ class ModuleRegistry:
             layer["layers"] = args[0]
             return layer
 
+        def layer_norm_layer(args):
+            if len(args) not in (1, 2):
+                raise R("nn.layer_norm_layer ожидает features и epsilon?")
+            features = args[0]
+            _positive_int("layer_norm_layer", features)
+            epsilon = args[1] if len(args) == 2 else 1e-5
+            ensure_number("layer_norm_layer", epsilon)
+            if epsilon <= 0.0:
+                raise R("nn.layer_norm_layer: epsilon должен быть > 0")
+            layer = DictValue()
+            layer["kind"] = "layer_norm"
+            layer["gamma"] = as_grad_tensor([1.0] * features, requires_grad=True)
+            layer["beta"] = as_grad_tensor([0.0] * features, requires_grad=True)
+            layer["epsilon"] = float(epsilon)
+            return layer
+
+        def self_attention_layer(args):
+            if len(args) not in (1, 2, 3):
+                raise R(
+                    "nn.self_attention_layer ожидает embed_dim, heads?, causal?"
+                )
+            features = args[0]
+            heads = args[1] if len(args) >= 2 else 1
+            causal = args[2] if len(args) >= 3 else False
+            _positive_int("self_attention_layer", features)
+            _positive_int("self_attention_layer heads", heads)
+            if features % heads:
+                raise R(
+                    "nn.self_attention_layer: embed_dim должен делиться на heads"
+                )
+            if not isinstance(causal, bool):
+                raise R("nn.self_attention_layer: causal должен быть bool")
+            limit = _pymath.sqrt(3.0 / features)
+            layer = DictValue()
+            layer["kind"] = "self_attention"
+            layer["heads"] = heads
+            layer["causal"] = causal
+            for projection in ("q", "k", "v", "o"):
+                layer[f"W{projection}"] = as_grad_tensor([
+                    [
+                        (_pyrandom.random() * 2.0 - 1.0) * limit
+                        for _ in range(features)
+                    ]
+                    for _ in range(features)
+                ], requires_grad=True)
+                layer[f"b{projection}"] = as_grad_tensor(
+                    [0.0] * features, requires_grad=True
+                )
+            return layer
+
+        def transformer_block_layer(args):
+            if len(args) < 3 or len(args) > 5:
+                raise R(
+                    "nn.transformer_block ожидает embed_dim, heads, "
+                    "hidden_dim, dropout?, causal?"
+                )
+            features, heads, hidden_dim = args[:3]
+            dropout_rate = args[3] if len(args) >= 4 else 0.1
+            causal = args[4] if len(args) >= 5 else False
+            _positive_int("transformer_block", features)
+            _positive_int("transformer_block heads", heads)
+            _positive_int("transformer_block hidden_dim", hidden_dim)
+            ensure_number("transformer_block dropout", dropout_rate)
+            if not 0.0 <= dropout_rate < 1.0:
+                raise R(
+                    "nn.transformer_block: dropout должен быть в диапазоне [0, 1)"
+                )
+            if not isinstance(causal, bool):
+                raise R("nn.transformer_block: causal должен быть bool")
+            layer = DictValue()
+            layer["kind"] = "transformer_block"
+            layer["norm1"] = layer_norm_layer([features])
+            layer["attention"] = self_attention_layer(
+                [features, heads, causal]
+            )
+            layer["norm2"] = layer_norm_layer([features])
+            layer["ff_layers"] = [
+                linear_layer([features, hidden_dim]),
+                activation_layer(["relu"]),
+                linear_layer([hidden_dim, features]),
+            ]
+            layer["dropout"] = float(dropout_rate)
+            return layer
+
         def activation_layer(args):
             if len(args) != 1 or args[0] not in ("relu", "sigmoid", "tanh", "softmax"):
                 raise R("nn.activation_layer ожидает relu, sigmoid, tanh или softmax")
@@ -474,6 +558,18 @@ class ModuleRegistry:
             model["layers"] = args[0]
             return model
 
+        def _apply_dropout(output, rate, training):
+            if not training or rate <= 0.0:
+                return output
+            scale = 1.0 / (1.0 - rate)
+
+            def make_mask(value):
+                if isinstance(value, list):
+                    return [make_mask(item) for item in value]
+                return 0.0 if _pyrandom.random() < rate else scale
+
+            return output.mul(as_grad_tensor(make_mask(output.data)))
+
         def _forward_layer_list(layers, output, training):
             for layer in layers:
                 if not isinstance(layer, DictValue) or "kind" not in layer:
@@ -483,10 +579,18 @@ class ModuleRegistry:
                     weights = layer["W"]
                     if len(output.shape()) == 1:
                         output = weights.matmul(output)
-                    elif len(output.shape()) == 2:
+                    elif len(output.shape()) >= 2:
+                        source_shape = output.shape()
+                        output = output.reshape([-1, source_shape[-1]])
                         output = output.matmul(weights.transpose())
+                        output = output.reshape(
+                            source_shape[:-1] + [weights.shape()[0]]
+                        )
                     else:
-                        raise R("linear слой ожидает вектор или матрицу [batch, features]")
+                        raise R(
+                            "linear слой ожидает вектор или тензор "
+                            "с последней осью признаков"
+                        )
                     output = output.add(layer["b"])
                 elif kind == "conv2d":
                     output = output.conv2d(
@@ -515,25 +619,47 @@ class ModuleRegistry:
                         layer["epsilon"],
                         layer["axis"],
                     )
+                elif kind == "layer_norm":
+                    output = output.layer_norm(
+                        layer["gamma"], layer["beta"], layer["epsilon"]
+                    )
                 elif kind == "dropout":
-                    if training and layer["rate"] > 0.0:
-                        scale = 1.0 / (1.0 - layer["rate"])
-
-                        def make_mask(value):
-                            if isinstance(value, list):
-                                return [make_mask(item) for item in value]
-                            return (
-                                0.0
-                                if _pyrandom.random() < layer["rate"]
-                                else scale
-                            )
-
-                        output = output.mul(as_grad_tensor(make_mask(output.data)))
+                    output = _apply_dropout(output, layer["rate"], training)
                 elif kind == "residual":
                     branch = _forward_layer_list(
                         layer["layers"], output, training
                     )
                     output = output.add(branch)
+                elif kind == "self_attention":
+                    output = output.multihead_attention(
+                        [
+                            layer["Wq"], layer["Wk"], layer["Wv"], layer["Wo"]
+                        ],
+                        [layer["bq"], layer["bk"], layer["bv"], layer["bo"]],
+                        layer["heads"],
+                        layer["causal"],
+                    )
+                elif kind == "transformer_block":
+                    normalized = _forward_layer_list(
+                        [layer["norm1"]], output, training
+                    )
+                    attended = _forward_layer_list(
+                        [layer["attention"]], normalized, training
+                    )
+                    attended = _apply_dropout(
+                        attended, layer["dropout"], training
+                    )
+                    residual = output.add(attended)
+                    normalized = _forward_layer_list(
+                        [layer["norm2"]], residual, training
+                    )
+                    feed_forward = _forward_layer_list(
+                        layer["ff_layers"], normalized, training
+                    )
+                    feed_forward = _apply_dropout(
+                        feed_forward, layer["dropout"], training
+                    )
+                    output = residual.add(feed_forward)
                 else:
                     raise R(f"nn.forward_layers: неизвестный тип слоя {kind!r}")
             return output
@@ -1513,12 +1639,36 @@ class ModuleRegistry:
                     plain["momentum"] = layer["momentum"]
                     plain["epsilon"] = layer["epsilon"]
                     plain["axis"] = layer["axis"]
+                elif kind == "layer_norm":
+                    plain["gamma"] = layer["gamma"].to_list()
+                    plain["beta"] = layer["beta"].to_list()
+                    plain["epsilon"] = layer["epsilon"]
+                elif kind == "self_attention":
+                    plain["weights"] = {
+                        name: layer[f"W{name}"].to_list()
+                        for name in ("q", "k", "v", "o")
+                    }
+                    plain["biases"] = {
+                        name: layer[f"b{name}"].to_list()
+                        for name in ("q", "k", "v", "o")
+                    }
+                    plain["heads"] = layer["heads"]
+                    plain["causal"] = layer["causal"]
                 elif kind == "dropout":
                     plain["rate"] = layer["rate"]
                 elif kind == "residual":
                     plain["layers"] = [
                         serialize_layer(child) for child in layer["layers"]
                     ]
+                elif kind == "transformer_block":
+                    plain["norm1"] = serialize_layer(layer["norm1"])
+                    plain["attention"] = serialize_layer(layer["attention"])
+                    plain["norm2"] = serialize_layer(layer["norm2"])
+                    plain["ff_layers"] = [
+                        serialize_layer(child)
+                        for child in layer["ff_layers"]
+                    ]
+                    plain["dropout"] = layer["dropout"]
                 elif kind not in ("linear", "conv2d", "flatten"):
                     raise R(f"nn.save_layers: неизвестный тип слоя {kind!r}")
                 return plain
@@ -1601,6 +1751,47 @@ class ModuleRegistry:
                     layer["momentum"] = plain["momentum"]
                     layer["epsilon"] = plain["epsilon"]
                     layer["axis"] = plain["axis"]
+                elif kind == "layer_norm":
+                    gamma, beta = plain.get("gamma"), plain.get("beta")
+                    epsilon = plain.get("epsilon")
+                    if (
+                        not isinstance(gamma, list)
+                        or not gamma
+                        or not isinstance(beta, list)
+                        or len(beta) != len(gamma)
+                        or not isinstance(epsilon, (int, float))
+                        or isinstance(epsilon, bool)
+                        or epsilon <= 0
+                    ):
+                        raise R("nn.load_layers: некорректные параметры layer_norm")
+                    layer["gamma"] = as_grad_tensor(gamma, requires_grad=True)
+                    layer["beta"] = as_grad_tensor(beta, requires_grad=True)
+                    layer["epsilon"] = float(epsilon)
+                elif kind == "self_attention":
+                    stored_weights = plain.get("weights")
+                    stored_biases = plain.get("biases")
+                    heads = plain.get("heads")
+                    causal = plain.get("causal")
+                    if (
+                        not isinstance(stored_weights, dict)
+                        or not isinstance(stored_biases, dict)
+                        or not isinstance(heads, int)
+                        or isinstance(heads, bool)
+                        or heads <= 0
+                        or not isinstance(causal, bool)
+                    ):
+                        raise R("nn.load_layers: некорректные параметры attention")
+                    for name in ("q", "k", "v", "o"):
+                        if name not in stored_weights or name not in stored_biases:
+                            raise R("nn.load_layers: отсутствует проекция attention")
+                        layer[f"W{name}"] = as_grad_tensor(
+                            stored_weights[name], requires_grad=True
+                        )
+                        layer[f"b{name}"] = as_grad_tensor(
+                            stored_biases[name], requires_grad=True
+                        )
+                    layer["heads"] = heads
+                    layer["causal"] = causal
                 elif kind == "dropout":
                     rate = plain.get("rate")
                     if (
@@ -1618,6 +1809,36 @@ class ModuleRegistry:
                     layer["layers"] = [
                         deserialize_layer(child) for child in children
                     ]
+                elif kind == "transformer_block":
+                    required = (
+                        "norm1", "attention", "norm2", "ff_layers", "dropout"
+                    )
+                    if any(name not in plain for name in required):
+                        raise R("nn.load_layers: неполный transformer_block")
+                    if not isinstance(plain["ff_layers"], list) or not plain["ff_layers"]:
+                        raise R("nn.load_layers: некорректный feed-forward блок")
+                    dropout = plain["dropout"]
+                    if (
+                        not isinstance(dropout, (int, float))
+                        or isinstance(dropout, bool)
+                        or dropout < 0.0
+                        or dropout >= 1.0
+                    ):
+                        raise R("nn.load_layers: некорректный dropout в transformer")
+                    layer["norm1"] = deserialize_layer(plain["norm1"])
+                    layer["attention"] = deserialize_layer(plain["attention"])
+                    layer["norm2"] = deserialize_layer(plain["norm2"])
+                    if (
+                        layer["norm1"]["kind"] != "layer_norm"
+                        or layer["attention"]["kind"] != "self_attention"
+                        or layer["norm2"]["kind"] != "layer_norm"
+                    ):
+                        raise R("nn.load_layers: неверные компоненты transformer")
+                    layer["ff_layers"] = [
+                        deserialize_layer(child)
+                        for child in plain["ff_layers"]
+                    ]
+                    layer["dropout"] = float(dropout)
                 elif kind not in ("linear", "conv2d", "flatten"):
                     raise R(f"nn.load_layers: неизвестный тип слоя {kind!r}")
                 return layer
@@ -2285,6 +2506,13 @@ class ModuleRegistry:
             "batch_norm_layer": Builtin("batch_norm_layer", batch_norm_layer),
             "dropout_layer": Builtin("dropout_layer", dropout_layer),
             "residual_layer": Builtin("residual_layer", residual_layer),
+            "layer_norm_layer": Builtin("layer_norm_layer", layer_norm_layer),
+            "self_attention_layer": Builtin(
+                "self_attention_layer", self_attention_layer
+            ),
+            "transformer_block": Builtin(
+                "transformer_block", transformer_block_layer
+            ),
             "activation_layer": Builtin("activation_layer", activation_layer),
             "max_pool2d_layer": Builtin("max_pool2d_layer", pool2d_layer),
             "flatten_layer": Builtin("flatten_layer", flatten_layer),

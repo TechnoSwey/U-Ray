@@ -1243,6 +1243,420 @@ class GradTensor(Tensor):
 
         return self._result(output_data, parents, backward)
 
+    def layer_norm(self, weight, bias, epsilon=1e-5):
+        """Normalize the last feature axis independently for every token."""
+        weight = as_grad_tensor(weight)
+        bias = as_grad_tensor(bias)
+        shape = self.shape()
+        if not shape or shape[-1] <= 0:
+            raise RuntimeErrorUray("layer_norm ожидает непустую ось признаков")
+        features = shape[-1]
+        if weight.shape() != [features] or bias.shape() != [features]:
+            raise RuntimeErrorUray(
+                "layer_norm: размерность параметров не совпадает с последней осью"
+            )
+        if not isinstance(epsilon, (int, float)) or isinstance(epsilon, bool) or epsilon <= 0:
+            raise RuntimeErrorUray("layer_norm: epsilon должен быть > 0")
+
+        np = get_numpy()
+        if np is not None:
+            array = np.asarray(self.data, dtype=float)
+            mean = array.mean(axis=-1, keepdims=True)
+            variance = array.var(axis=-1, keepdims=True)
+            inverse_std = 1.0 / np.sqrt(variance + float(epsilon))
+            normalized = (array - mean) * inverse_std
+            output = (
+                normalized * np.asarray(weight.data, dtype=float)
+                + np.asarray(bias.data, dtype=float)
+            )
+
+            def backward(gradient):
+                grad = np.asarray(gradient, dtype=float)
+                grad_weight = np.sum(grad * normalized, axis=tuple(
+                    range(grad.ndim - 1)
+                ))
+                grad_bias = np.sum(grad, axis=tuple(range(grad.ndim - 1)))
+                grad_sum = grad.sum(axis=-1, keepdims=True)
+                normalized_grad_sum = (grad * normalized).sum(
+                    axis=-1, keepdims=True
+                )
+                grad_input = (
+                    np.asarray(weight.data, dtype=float) * inverse_std / features
+                    * (
+                        features * grad
+                        - grad_sum
+                        - normalized * normalized_grad_sum
+                    )
+                )
+                return (
+                    _array_to_data(grad_input),
+                    _array_to_data(grad_weight),
+                    _array_to_data(grad_bias),
+                )
+
+            return self._result(
+                _array_to_data(output), (self, weight, bias), backward
+            )
+
+        flat = _flatten(self.data)
+        grad_groups = None
+        groups = [flat[index:index + features] for index in range(0, len(flat), features)]
+        means = [sum(group) / features for group in groups]
+        variances = [
+            sum((value - means[index]) ** 2 for value in group) / features
+            for index, group in enumerate(groups)
+        ]
+        inverse_std = [
+            1.0 / math.sqrt(variance + float(epsilon))
+            for variance in variances
+        ]
+        normalized_groups = [
+            [
+                (value - means[index]) * inverse_std[index]
+                for value in group
+            ]
+            for index, group in enumerate(groups)
+        ]
+        output_groups = [
+            [
+                normalized_groups[group_index][feature] * weight.data[feature]
+                + bias.data[feature]
+                for feature in range(features)
+            ]
+            for group_index in range(len(groups))
+        ]
+        output_data = _from_flat(
+            [value for group in output_groups for value in group], shape
+        )
+
+        def backward(gradient):
+            grad_groups = [
+                _flatten(gradient)[index:index + features]
+                for index in range(0, len(flat), features)
+            ]
+            input_groups = []
+            weight_grad = [0.0] * features
+            bias_grad = [0.0] * features
+            for group_index, group_grad in enumerate(grad_groups):
+                normalized = normalized_groups[group_index]
+                grad_sum = sum(group_grad)
+                norm_grad_sum = sum(
+                    grad * value for grad, value in zip(group_grad, normalized)
+                )
+                input_groups.append([
+                    weight.data[feature] * inverse_std[group_index] / features
+                    * (
+                        features * group_grad[feature]
+                        - grad_sum
+                        - normalized[feature] * norm_grad_sum
+                    )
+                    for feature in range(features)
+                ])
+                for feature in range(features):
+                    weight_grad[feature] += (
+                        group_grad[feature] * normalized[feature]
+                    )
+                    bias_grad[feature] += group_grad[feature]
+            return (
+                _from_flat(
+                    [value for group in input_groups for value in group], shape
+                ),
+                weight_grad,
+                bias_grad,
+            )
+
+        return self._result(
+            output_data, (self, weight, bias), backward
+        )
+
+    def multihead_attention(
+        self,
+        weights,
+        biases,
+        heads=1,
+        causal=False,
+    ):
+        """Scaled dot-product self-attention for [sequence, features] inputs."""
+        if len(self.shape()) not in (2, 3):
+            raise RuntimeErrorUray(
+                "multihead_attention ожидает [sequence, features] "
+                "или [batch, sequence, features]"
+            )
+        if not isinstance(heads, int) or isinstance(heads, bool) or heads <= 0:
+            raise RuntimeErrorUray("multihead_attention: heads должен быть > 0")
+        if not isinstance(causal, bool):
+            raise RuntimeErrorUray("multihead_attention: causal должен быть bool")
+        if len(weights) != 4 or len(biases) != 4:
+            raise RuntimeErrorUray("multihead_attention ожидает 4 матрицы и 4 bias")
+        weights = [as_grad_tensor(value) for value in weights]
+        biases = [as_grad_tensor(value) for value in biases]
+        original_shape = self.shape()
+        squeeze_batch = len(original_shape) == 2
+        x_data = [self.data] if squeeze_batch else self.data
+        batch_count, sequence, features = (
+            [1] + original_shape if squeeze_batch else original_shape
+        )
+        if sequence <= 0 or features <= 0 or features % heads:
+            raise RuntimeErrorUray(
+                "multihead_attention: features должны делиться на heads"
+            )
+        for weight, bias in zip(weights, biases):
+            if weight.shape() != [features, features] or bias.shape() != [features]:
+                raise RuntimeErrorUray(
+                    "multihead_attention: проекции должны иметь форму "
+                    "[features, features] и [features]"
+                )
+        depth = features // heads
+        scale = 1.0 / math.sqrt(depth)
+        parents = (self, *weights, *biases)
+        np = get_numpy()
+
+        if np is not None:
+            x_array = np.asarray(x_data, dtype=float)
+            weight_arrays = [
+                np.asarray(value.data, dtype=float) for value in weights
+            ]
+            bias_arrays = [
+                np.asarray(value.data, dtype=float) for value in biases
+            ]
+            projected = [
+                x_array @ weight_arrays[index] + bias_arrays[index]
+                for index in range(3)
+            ]
+            q, k, v = [
+                value.reshape(batch_count, sequence, heads, depth).transpose(
+                    0, 2, 1, 3
+                )
+                for value in projected
+            ]
+            scores = (q @ k.transpose(0, 1, 3, 2)) * scale
+            future_mask = None
+            if causal:
+                future_mask = np.triu(
+                    np.ones((sequence, sequence), dtype=bool), k=1
+                )
+                scores = np.where(future_mask[None, None, :, :], -1e30, scores)
+            scores -= scores.max(axis=-1, keepdims=True)
+            probabilities = np.exp(scores)
+            probabilities /= probabilities.sum(axis=-1, keepdims=True)
+            context = probabilities @ v
+            merged = context.transpose(0, 2, 1, 3).reshape(
+                batch_count, sequence, features
+            )
+            output = merged @ weight_arrays[3] + bias_arrays[3]
+
+            def backward(gradient):
+                grad = np.asarray(
+                    [gradient] if squeeze_batch else gradient, dtype=float
+                )
+                grad_weights = [None] * 4
+                grad_biases = [None] * 4
+                grad_weights[3] = np.einsum("bse,bsd->ed", merged, grad)
+                grad_biases[3] = grad.sum(axis=(0, 1))
+                grad_merged = grad @ weight_arrays[3].T
+                grad_context = grad_merged.reshape(
+                    batch_count, sequence, heads, depth
+                ).transpose(0, 2, 1, 3)
+                grad_q = np.zeros_like(q)
+                grad_k = np.zeros_like(k)
+                grad_v = np.zeros_like(v)
+                for head in range(heads):
+                    probability = probabilities[:, head]
+                    grad_head = grad_context[:, head]
+                    value_head = v[:, head]
+                    query_head = q[:, head]
+                    key_head = k[:, head]
+                    grad_v[:, head] = probability.transpose(0, 2, 1) @ grad_head
+                    grad_probability = grad_head @ value_head.transpose(0, 2, 1)
+                    grad_score = probability * (
+                        grad_probability
+                        - (grad_probability * probability).sum(
+                            axis=-1, keepdims=True
+                        )
+                    )
+                    if future_mask is not None:
+                        grad_score = np.where(
+                            future_mask[None, :, :], 0.0, grad_score
+                        )
+                    grad_q[:, head] = (grad_score @ key_head) * scale
+                    grad_k[:, head] = (
+                        grad_score.transpose(0, 2, 1) @ query_head
+                    ) * scale
+                grad_projected = [
+                    value.transpose(0, 2, 1, 3).reshape(
+                        batch_count, sequence, features
+                    )
+                    for value in (grad_q, grad_k, grad_v)
+                ]
+                grad_input = np.zeros_like(x_array)
+                for index in range(3):
+                    grad_weights[index] = np.einsum(
+                        "bse,bsd->ed", x_array, grad_projected[index]
+                    )
+                    grad_biases[index] = grad_projected[index].sum(axis=(0, 1))
+                    grad_input += (
+                        grad_projected[index] @ weight_arrays[index].T
+                    )
+                result = [
+                    _array_to_data(grad_input[0] if squeeze_batch else grad_input)
+                ]
+                result.extend(_array_to_data(value) for value in grad_weights)
+                result.extend(_array_to_data(value) for value in grad_biases)
+                return tuple(result)
+
+            return self._result(
+                _array_to_data(output[0] if squeeze_batch else output),
+                parents,
+                backward,
+            )
+
+        projected_batches = []
+        caches = []
+        for sample in x_data:
+            projected = [
+                _broadcast_binary(_matmul(sample, weights[index].data),
+                                  biases[index].data, lambda a, b: a + b)
+                for index in range(3)
+            ]
+            query_heads = [
+                [row[head * depth:(head + 1) * depth] for row in projected[0]]
+                for head in range(heads)
+            ]
+            key_heads = [
+                [row[head * depth:(head + 1) * depth] for row in projected[1]]
+                for head in range(heads)
+            ]
+            value_heads = [
+                [row[head * depth:(head + 1) * depth] for row in projected[2]]
+                for head in range(heads)
+            ]
+            probabilities = []
+            contexts = []
+            for head in range(heads):
+                score = _scale_data(
+                    _matmul(query_heads[head], _transpose(key_heads[head])),
+                    scale,
+                )
+                if causal:
+                    for row in range(sequence):
+                        for column in range(row + 1, sequence):
+                            score[row][column] = -1e30
+                probability = _softmax_rows(score)
+                context = _matmul(probability, value_heads[head])
+                probabilities.append(probability)
+                contexts.append(context)
+            merged = [
+                [
+                    contexts[head][position][feature]
+                    for head in range(heads)
+                    for feature in range(depth)
+                ]
+                for position in range(sequence)
+            ]
+            output = _broadcast_binary(
+                _matmul(merged, weights[3].data),
+                biases[3].data,
+                lambda a, b: a + b,
+            )
+            projected_batches.append(output)
+            caches.append((
+                sample, query_heads, key_heads, value_heads, probabilities, merged
+            ))
+
+        def backward(gradient):
+            grad_batches = [gradient] if squeeze_batch else gradient
+            grad_input_batches = []
+            grad_weights = [_zeros_like(value.data) for value in weights]
+            grad_biases = [_zeros_like(value.data) for value in biases]
+            for batch_index, grad_output in enumerate(grad_batches):
+                sample, query_heads, key_heads, value_heads, probabilities, merged = (
+                    caches[batch_index]
+                )
+                grad_weights[3] = _add_data(
+                    grad_weights[3],
+                    _matmul(_transpose(merged), grad_output),
+                )
+                grad_biases[3] = _add_data(
+                    grad_biases[3], _sum_axis0(grad_output)
+                )
+                grad_merged = _matmul(
+                    grad_output, _transpose(weights[3].data)
+                )
+                grad_query_heads, grad_key_heads, grad_value_heads = [], [], []
+                for head in range(heads):
+                    start = head * depth
+                    end = start + depth
+                    grad_context = [
+                        row[start:end] for row in grad_merged
+                    ]
+                    probability = probabilities[head]
+                    value_head = value_heads[head]
+                    query_head = query_heads[head]
+                    key_head = key_heads[head]
+                    grad_value_heads.append(
+                        _matmul(_transpose(probability), grad_context)
+                    )
+                    grad_probability = _matmul(
+                        grad_context, _transpose(value_head)
+                    )
+                    grad_score = []
+                    for row in range(sequence):
+                        dot = sum(
+                            grad_probability[row][column]
+                            * probability[row][column]
+                            for column in range(sequence)
+                        )
+                        grad_score.append([
+                            0.0 if causal and column > row else
+                            probability[row][column]
+                            * (grad_probability[row][column] - dot)
+                            for column in range(sequence)
+                        ])
+                    grad_query_heads.append(_scale_data(
+                        _matmul(grad_score, key_head), scale
+                    ))
+                    grad_key_heads.append(_scale_data(
+                        _matmul(_transpose(grad_score), query_head), scale
+                    ))
+                grad_projected = []
+                for head_groups in (
+                    grad_query_heads, grad_key_heads, grad_value_heads
+                ):
+                    grad_projected.append([
+                        [
+                            head_groups[head][position][feature]
+                            for head in range(heads)
+                            for feature in range(depth)
+                        ]
+                        for position in range(sequence)
+                    ])
+                grad_input = _zeros_like(sample)
+                for index in range(3):
+                    grad_weights[index] = _add_data(
+                        grad_weights[index],
+                        _matmul(
+                            _transpose(sample), grad_projected[index]
+                        ),
+                    )
+                    grad_biases[index] = _add_data(
+                        grad_biases[index], _sum_axis0(grad_projected[index])
+                    )
+                    grad_input = _add_data(
+                        grad_input,
+                        _matmul(
+                            grad_projected[index],
+                            _transpose(weights[index].data),
+                        ),
+                    )
+                grad_input_batches.append(grad_input)
+            result = [grad_input_batches[0] if squeeze_batch else grad_input_batches]
+            result.extend(grad_weights)
+            result.extend(grad_biases)
+            return tuple(result)
+
+        output_data = projected_batches[0] if squeeze_batch else projected_batches
+        return self._result(output_data, parents, backward)
+
     def backward(self, gradient=None):
         if not self.requires_grad:
             raise RuntimeErrorUray("Нельзя вызвать backward у тензора без градиента")

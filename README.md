@@ -83,9 +83,9 @@ python3 examples/download_mnist.py
 
 | Язык | Математика | Машинное обучение |
 | --- | --- | --- |
-| Функции, рекурсия, условия и циклы | Встроенные `math` и `linalg` | `nn`: MLP, autodiff, Conv2D и MNIST |
+| Функции, рекурсия, условия и циклы | Встроенные `math` и `linalg` | `nn`: MLP, autodiff, CNN и Transformer |
 | Списки, словари, кортежи и строки | Python по умолчанию, NumPy по выбору | Dense-, сверточные и residual-блоки |
-| Деструктуризация структур в `match` | `matmul`, свёртки, pooling и активации | BatchNorm, Dropout, SGD и Adam |
+| Деструктуризация структур в `match` | Self-attention с causal-маской | BatchNorm, LayerNorm, Dropout и Adam |
 | REPL с Tab-дополнением и CLI | `uray fmt` для единого стиля | Предварительная проверка размерностей ML |
 | Сохранение и загрузка моделей | Без обязательных зависимостей | Подсветка для VS Code и Termux |
 
@@ -144,6 +144,7 @@ print("accuracy:", metrics[1])
 | [`mnist.ur`](examples/mnist.ur) | Загружает полный MNIST, обучает классификатор, оценивает его и сохраняет модель |
 | [`mnist_cnn.ur`](examples/mnist_cnn.ur) | Обучает сверточную модель через общий autodiff и сохраняет её |
 | [`residual_regularization.ur`](examples/residual_regularization.ur) | Показывает BatchNorm, Dropout и обучаемую residual-ветвь |
+| [`transformer_sequence.ur`](examples/transformer_sequence.ur) | Обучает Transformer-блок с multi-head causal self-attention |
 | [`progress.ur`](examples/progress.ur) | Показывает прогресс обучения и текущий loss после каждой эпохи |
 
 [Каталог примеров и команды запуска →](examples/README.md)

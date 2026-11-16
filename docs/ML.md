@@ -287,6 +287,15 @@ model = nn.sequential([
 прибавляет её результат к входу. Вход и ветвь должны иметь одинаковую форму.
 Вложенные слои входят в `nn.parameters`, обучение и сохранение модели.
 
+Для последовательностей доступны `nn.self_attention_layer(embed_dim, heads,
+causal)` и `nn.transformer_block(embed_dim, heads, hidden_dim, dropout, causal)`.
+Self-attention работает с формами `[sequence, features]` и
+`[batch, sequence, features]`; число признаков должно делиться на число голов.
+Causal-маска запрещает позиции смотреть на будущие токены. Transformer-блок
+содержит pre-LayerNorm, multi-head attention, feed-forward сеть и две residual
+связи. Входом служат числовые embeddings; токенизатор и таблицу embeddings нужно
+строить отдельно.
+
 ```uray
 model = nn.sequential([
     nn.batch_norm_layer(32),
@@ -297,6 +306,13 @@ model = nn.sequential([
         nn.linear_layer(64, 32)
     ]),
     nn.linear_layer(32, 10)
+])
+```
+
+```uray
+sequence_model = nn.sequential([
+    nn.transformer_block(128, 4, 512, 0.1, true),
+    nn.linear_layer(128, 32)
 ])
 ```
 
@@ -329,6 +345,12 @@ loaded = nn.load_layers("model.json")
 
 ```
 ./uray examples/residual_regularization.ur
+```
+
+Пример обучения Transformer-блока на последовательностях:
+
+```
+./uray examples/transformer_sequence.ur
 ```
 
 Полный пример сверточной сети на MNIST:

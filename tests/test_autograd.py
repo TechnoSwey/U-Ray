@@ -321,6 +321,150 @@ class AutogradTests(unittest.TestCase):
         self.assertEqual(len(metrics), 2)
         self.assertEqual(model["layers"][0]["running_mean"], running_mean)
 
+    def test_layer_norm_gradient_matches_finite_difference(self):
+        values = [[0.2, -0.3, 0.7], [1.1, 0.4, -0.2]]
+        probe = [[0.3, -0.5, 0.8], [-0.1, 0.6, 0.2]]
+        layer = self.nn.members["layer_norm_layer"].fn([3])
+        x = GradTensor(values, requires_grad=True)
+        output = x.layer_norm(layer["gamma"], layer["beta"], layer["epsilon"])
+        output.mul(probe).sum_all().backward()
+        numeric = _finite_difference(
+            lambda data: GradTensor(data).layer_norm(
+                GradTensor([1.0, 1.0, 1.0]),
+                GradTensor([0.0, 0.0, 0.0]),
+            ).mul(probe).sum_all().item(),
+            values,
+            [0, 1],
+        )
+        self.assertAlmostEqual(x.grad[0][1], numeric, places=5)
+
+    def test_multihead_attention_gradient_and_causal_mask(self):
+        values = [
+            [0.1, 0.2, -0.1, 0.4],
+            [0.5, -0.2, 0.3, 0.7],
+            [-0.3, 0.6, 0.8, -0.4],
+        ]
+        probe = [
+            [0.2, -0.4, 0.7, 0.1],
+            [-0.3, 0.5, 0.2, -0.8],
+            [0.4, 0.1, -0.2, 0.6],
+        ]
+        matrices = [
+            [[0.3, -0.2, 0.1, 0.4], [0.2, 0.5, -0.3, 0.1],
+             [-0.4, 0.2, 0.6, -0.1], [0.1, -0.5, 0.2, 0.3]],
+            [[-0.2, 0.4, 0.1, 0.3], [0.5, -0.1, 0.2, -0.4],
+             [0.3, 0.2, -0.5, 0.1], [-0.1, 0.6, 0.4, 0.2]],
+            [[0.4, 0.1, -0.3, 0.2], [-0.2, 0.3, 0.5, 0.1],
+             [0.1, -0.4, 0.2, 0.6], [0.3, 0.2, -0.1, -0.5]],
+            [[0.2, -0.1, 0.3, 0.4], [0.1, 0.5, -0.2, 0.3],
+             [-0.4, 0.2, 0.6, -0.1], [0.3, 0.1, -0.5, 0.2]],
+        ]
+
+        def make_attention(data, matrix_values=matrices):
+            weights = [GradTensor(value) for value in matrix_values]
+            biases = [GradTensor([0.0] * 4) for _ in range(4)]
+            return GradTensor(data).multihead_attention(
+                weights, biases, 2, True
+            )
+
+        x = GradTensor(values, requires_grad=True)
+        weights = [GradTensor(value, requires_grad=True) for value in matrices]
+        biases = [GradTensor([0.0] * 4, requires_grad=True) for _ in range(4)]
+        output = x.multihead_attention(weights, biases, 2, True)
+        output.mul(probe).sum_all().backward()
+        numeric = _finite_difference(
+            lambda data: make_attention(data).mul(probe).sum_all().item(),
+            values,
+            [1, 2],
+        )
+        self.assertAlmostEqual(x.grad[1][2], numeric, places=5)
+        numeric_weight = _finite_difference(
+            lambda value: make_attention(
+                values, [value] + matrices[1:]
+            ).mul(probe).sum_all().item(),
+            matrices[0],
+            [0, 1],
+        )
+        self.assertAlmostEqual(weights[0].grad[0][1], numeric_weight, places=5)
+        changed_future = [row[:] for row in values]
+        changed_future[2] = [9.0, -8.0, 7.0, -6.0]
+        causal_output = make_attention(values).data
+        changed_output = make_attention(changed_future).data
+        self.assertEqual(causal_output[0], changed_output[0])
+
+    def test_attention_numpy_matches_python_and_batched_shape(self):
+        try:
+            import numpy  # noqa: F401
+        except ImportError:
+            self.skipTest("NumPy is optional")
+        data = [
+            [[0.1, 0.2, 0.3, 0.4], [0.5, -0.1, 0.2, 0.7]],
+            [[-0.2, 0.4, 0.1, 0.6], [0.3, 0.8, -0.5, 0.2]],
+        ]
+        matrix = [[0.2, -0.1, 0.3, 0.4], [0.1, 0.5, -0.2, 0.3],
+                  [-0.4, 0.2, 0.6, -0.1], [0.3, 0.1, -0.5, 0.2]]
+        results = []
+        for backend in ("python", "numpy"):
+            set_backend(backend)
+            x = GradTensor(data, requires_grad=True)
+            weights = [
+                GradTensor(matrix, requires_grad=True) for _ in range(4)
+            ]
+            biases = [
+                GradTensor([0.0] * 4, requires_grad=True) for _ in range(4)
+            ]
+            output = x.multihead_attention(weights, biases, 2, True)
+            output.pow(2).mean().backward()
+            results.append([
+                output.data, x.grad,
+                [weight.grad for weight in weights],
+                [bias.grad for bias in biases],
+            ])
+        for left, right in zip(
+            _flatten_nested(results[0]), _flatten_nested(results[1])
+        ):
+            self.assertAlmostEqual(left, right, places=10)
+
+    def test_transformer_block_trains_and_roundtrips(self):
+        self.nn.members["rand_seed"].fn([41])
+        block = self.nn.members["transformer_block"].fn([4, 2, 8, 0.1, True])
+        model = self.nn.members["sequential"].fn([[
+            block,
+            self.nn.members["linear_layer"].fn([4, 3]),
+        ]])
+        x = [
+            [[1.0, 0.0, 0.0, 1.0], [0.0, 1.0, 0.0, 1.0]],
+            [[0.0, 1.0, 1.0, 0.0], [1.0, 0.0, 1.0, 0.0]],
+            [[0.5, 0.5, 0.0, 1.0], [0.0, 0.5, 0.5, 1.0]],
+            [[1.0, 0.0, 0.5, 0.5], [0.5, 1.0, 0.0, 0.5]],
+        ]
+        y = [
+            [[0.2, 0.4, 0.1], [0.3, 0.1, 0.5]],
+            [[0.1, 0.6, 0.2], [0.7, 0.1, 0.2]],
+            [[0.3, 0.2, 0.1], [0.2, 0.3, 0.4]],
+            [[0.5, 0.2, 0.1], [0.1, 0.5, 0.2]],
+        ]
+        history = self.nn.members["train_layers"].fn([
+            model, x, y, 2, 0.01, 2, "mse", "adam", False,
+        ])
+        self.assertEqual(len(history), 2)
+        self.assertTrue(all(math.isfinite(value) for value in history))
+        params = self.nn.members["parameters"].fn([model])
+        self.assertEqual(len(params), 18)
+        self.assertTrue(all(param.grad is None for param in params))
+        input_batch = GradTensor(x[:2])
+        output_before = self.nn.members["forward_layers"].fn(
+            [model, input_batch]
+        ).data
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / "transformer.json")
+            self.nn.members["save_layers"].fn([model, path])
+            loaded = self.nn.members["load_layers"].fn([path])
+        output_after = self.nn.members["forward_layers"].fn(
+            [loaded, input_batch]
+        ).data
+        self.assertEqual(output_after, output_before)
+
     def test_numpy_conv2d_matches_python_when_available(self):
         try:
             import numpy  # noqa: F401
