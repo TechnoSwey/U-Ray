@@ -333,10 +333,11 @@ loaded = nn.load_layers("model.json")
 `nn.train_layers` поддерживает loss `"cce"`, `"bce"` (логиты) и `"mse"`,
 оптимизаторы `"adam"` и `"sgd"`. `show_progress` по умолчанию включён. Для
 изображений укажи `input_shape`, например `[1, 28, 28]`; шкала обновляется по
-мини-батчам. Встроенный `native` backend выполняет матричные умножения, Conv2D,
-ReLU и max-pooling в прямом и обратном проходах через C-ядра; CNN можно обучать без
-NumPy. Остальные операции autodiff остаются в обычном runtime U-Ray. На Python
-backend удобно проверять небольшие датасеты и примеры.
+мини-батчам. Встроенный `native` backend выполняет матричные умножения,
+multi-head attention, Conv2D, ReLU и max-pooling в прямом и обратном проходах
+через C-ядра; CNN и Transformer можно запускать без NumPy. Остальные операции
+autodiff остаются в обычном runtime U-Ray. На Python backend удобно проверять
+небольшие датасеты и примеры.
 
 Сохранение модели включает параметры BatchNorm, running statistics, Dropout и
 вложенные residual-ветви; при загрузке восстановленные слои готовы к оценке
@@ -504,6 +505,19 @@ native/NumPy и точность обеих моделей. Цель по умо
 ```
 python3 benchmarks/benchmark_cnn.py --full --max-slowdown-seconds 5
 ```
+
+Для сравнения Transformer backend на воспроизводимом sequence-regression наборе
+запусти:
+
+```
+python3 benchmarks/benchmark_transformer.py
+```
+
+Скрипт прогревает каждый backend, сравнивает медиану нескольких полных циклов
+train+evaluate и по умолчанию сообщает `PASS`, если native не медленнее NumPy
+более чем в 1,5 раза. Размеры последовательности, модели, выборки и число
+повторов можно менять через CLI-флаги. NumPy нужен только для контрольного
+замера; `--backend=native` выполняет attention встроенным C-ядром.
 
 ---
 

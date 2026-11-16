@@ -476,6 +476,68 @@ class AutogradTests(unittest.TestCase):
         ):
             self.assertAlmostEqual(left, right, places=10)
 
+    def test_native_attention_matches_python_forward_and_backward(self):
+        try:
+            set_backend("native")
+        except RuntimeErrorUray as error:
+            self.skipTest(str(error))
+        self.assertIsNone(get_numpy())
+        data = [
+            [[0.1, 0.2, 0.3, 0.4], [0.5, -0.1, 0.2, 0.7],
+             [-0.2, 0.4, 0.1, 0.6]],
+            [[0.3, 0.8, -0.5, 0.2], [0.7, -0.3, 0.2, 0.1],
+             [0.1, 0.2, 0.6, -0.4]],
+        ]
+        matrix = [
+            [0.2, -0.1, 0.3, 0.4],
+            [0.1, 0.5, -0.2, 0.3],
+            [-0.4, 0.2, 0.6, -0.1],
+            [0.3, 0.1, -0.5, 0.2],
+        ]
+        biases = [[index * 0.01 for index in range(4)] for _ in range(4)]
+        cases = [
+            (data, False, [
+                [[(batch + row + column) / 9 for column in range(4)]
+                 for row in range(3)]
+                for batch in range(2)
+            ]),
+            (data, True, [
+                [[(batch + row + column) / 9 for column in range(4)]
+                 for row in range(3)]
+                for batch in range(2)
+            ]),
+            (data[0], True, [
+                [(row + column) / 7 for column in range(4)]
+                for row in range(3)
+            ]),
+        ]
+        for values, causal, probe in cases:
+            results = []
+            for backend in ("python", "native"):
+                set_backend(backend)
+                x = GradTensor(values, requires_grad=True)
+                weights = [
+                    GradTensor(matrix, requires_grad=True) for _ in range(4)
+                ]
+                layer_biases = [
+                    GradTensor(value, requires_grad=True) for value in biases
+                ]
+                output = x.multihead_attention(
+                    weights, layer_biases, heads=2, causal=causal
+                )
+                output.mul(probe).sum_all().backward()
+                results.append((
+                    output.data,
+                    x.grad,
+                    [weight.grad for weight in weights],
+                    [bias.grad for bias in layer_biases],
+                ))
+            for expected, actual in zip(results[0], results[1]):
+                for left, right in zip(
+                    _flatten_nested(expected), _flatten_nested(actual)
+                ):
+                    self.assertAlmostEqual(left, right, places=10)
+
     def test_transformer_block_trains_and_roundtrips(self):
         self.nn.members["rand_seed"].fn([41])
         block = self.nn.members["transformer_block"].fn([4, 2, 8, 0.1, True])

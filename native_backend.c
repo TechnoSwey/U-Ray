@@ -783,6 +783,400 @@ static int checked_product(size_t a, size_t b, size_t *result) {
     return 1;
 }
 
+static size_t attention_qkv_index(
+    size_t batch, size_t head, size_t position, size_t feature,
+    size_t heads, size_t sequence, size_t depth
+) {
+    return ((batch * heads + head) * sequence + position) * depth + feature;
+}
+
+static size_t attention_score_index(
+    size_t batch, size_t head, size_t query, size_t key,
+    size_t heads, size_t sequence
+) {
+    return ((batch * heads + head) * sequence + query) * sequence + key;
+}
+
+static int attention_dimensions(
+    size_t batches, size_t sequence, size_t features, size_t heads,
+    size_t *input_count, size_t *attention_count, size_t *score_count,
+    size_t *matrix_count
+) {
+    if (batches == 0 || sequence == 0 || features == 0 || heads == 0 ||
+        features % heads != 0) {
+        return 0;
+    }
+    size_t batch_sequence, batch_features, batch_heads, depth = features / heads;
+    return checked_product(batches, sequence, &batch_sequence) &&
+        checked_product(batch_sequence, features, input_count) &&
+        checked_product(batch_sequence, features, &batch_features) &&
+        checked_product(batches, heads, &batch_heads) &&
+        checked_product(batch_heads, sequence, attention_count) &&
+        checked_product(*attention_count, depth, attention_count) &&
+        checked_product(batch_heads, sequence, score_count) &&
+        checked_product(*score_count, sequence, score_count) &&
+        checked_product(features, features, matrix_count) &&
+        *input_count <= SIZE_MAX / sizeof(double) &&
+        *attention_count <= SIZE_MAX / sizeof(double) &&
+        *score_count <= SIZE_MAX / sizeof(double) &&
+        *matrix_count <= SIZE_MAX / sizeof(double) &&
+        batch_features == *input_count;
+}
+
+int uray_attention_forward(
+    size_t batches, size_t sequence, size_t features, size_t heads, int causal,
+    const double *input,
+    const double *weight_q, const double *weight_k,
+    const double *weight_v, const double *weight_o,
+    const double *bias_q, const double *bias_k,
+    const double *bias_v, const double *bias_o,
+    double *output, double *queries, double *keys, double *values,
+    double *probabilities, double *merged
+) {
+    size_t input_count, attention_count, score_count, matrix_count;
+    if (causal < 0 || causal > 1 ||
+        !attention_dimensions(
+            batches, sequence, features, heads, &input_count,
+            &attention_count, &score_count, &matrix_count
+        ) ||
+        input == NULL || weight_q == NULL || weight_k == NULL ||
+        weight_v == NULL || weight_o == NULL || bias_q == NULL ||
+        bias_k == NULL || bias_v == NULL || bias_o == NULL ||
+        output == NULL || queries == NULL || keys == NULL || values == NULL ||
+        probabilities == NULL || merged == NULL) {
+        return 1;
+    }
+    (void)input_count;
+    (void)matrix_count;
+
+    size_t depth = features / heads;
+    double scale = 1.0 / sqrt((double)depth);
+    size_t scratch_count;
+    if (!checked_product(sequence, features, &scratch_count) ||
+        scratch_count > SIZE_MAX / sizeof(double)) {
+        return 1;
+    }
+    double *projected = calloc(scratch_count, sizeof(double));
+    double *key_transposed = calloc(attention_count, sizeof(double));
+    double *context = calloc(scratch_count, sizeof(double));
+    if (projected == NULL || key_transposed == NULL || context == NULL) {
+        free(projected);
+        free(key_transposed);
+        free(context);
+        return 2;
+    }
+    const double *projection_weights[3] = {
+        weight_q, weight_k, weight_v
+    };
+    const double *projection_biases[3] = {
+        bias_q, bias_k, bias_v
+    };
+    double *projection_outputs[3] = {
+        queries, keys, values
+    };
+    for (size_t projection = 0; projection < 3; ++projection) {
+        for (size_t batch = 0; batch < batches; ++batch) {
+            const double *input_batch =
+                input + batch * sequence * features;
+            uray_matmul(
+                sequence, features, features, input_batch,
+                projection_weights[projection], projected
+            );
+            for (size_t position = 0; position < sequence; ++position) {
+                for (size_t head = 0; head < heads; ++head) {
+                    for (size_t feature = 0; feature < depth; ++feature) {
+                        size_t output_feature = head * depth + feature;
+                        projection_outputs[projection][attention_qkv_index(
+                            batch, head, position, feature,
+                            heads, sequence, depth
+                        )] = projected[position * features + output_feature]
+                            + projection_biases[projection][output_feature];
+                    }
+                }
+            }
+        }
+    }
+
+    for (size_t batch = 0; batch < batches; ++batch) {
+        for (size_t head = 0; head < heads; ++head) {
+            for (size_t key = 0; key < sequence; ++key) {
+                for (size_t feature = 0; feature < depth; ++feature) {
+                    key_transposed[feature * sequence + key] =
+                        keys[attention_qkv_index(
+                            batch, head, key, feature,
+                            heads, sequence, depth
+                        )];
+                }
+            }
+            double *head_probabilities = probabilities +
+                (batch * heads + head) * sequence * sequence;
+            const double *head_queries = queries +
+                (batch * heads + head) * sequence * depth;
+            uray_matmul(
+                sequence, depth, sequence,
+                head_queries, key_transposed, head_probabilities
+            );
+            for (size_t query = 0; query < sequence; ++query) {
+                for (size_t key = 0; key < sequence; ++key) {
+                    size_t index = query * sequence + key;
+                    if (causal && key > query) {
+                        head_probabilities[index] = -1e30;
+                    } else {
+                        head_probabilities[index] *= scale;
+                    }
+                }
+            }
+            for (size_t query = 0; query < sequence; ++query) {
+                size_t row = query * sequence;
+                double maximum = -INFINITY;
+                for (size_t key = 0; key < sequence; ++key) {
+                    if (head_probabilities[row + key] > maximum)
+                        maximum = head_probabilities[row + key];
+                }
+                double total = 0.0;
+                for (size_t key = 0; key < sequence; ++key) {
+                    double value = head_probabilities[row + key];
+                    value = (causal && key > query)
+                        ? 0.0 : exp(value - maximum);
+                    head_probabilities[row + key] = value;
+                    total += value;
+                }
+                if (!(total > 0.0) || !isfinite(total)) {
+                    free(projected);
+                    free(key_transposed);
+                    free(context);
+                    return 2;
+                }
+                for (size_t key = 0; key < sequence; ++key) {
+                    head_probabilities[row + key] /= total;
+                }
+            }
+            const double *head_values = values +
+                (batch * heads + head) * sequence * depth;
+            uray_matmul(
+                sequence, sequence, depth, head_probabilities,
+                head_values, context
+            );
+            for (size_t position = 0; position < sequence; ++position) {
+                for (size_t feature = 0; feature < depth; ++feature) {
+                    merged[(batch * sequence + position) * features +
+                           head * depth + feature] =
+                        context[position * depth + feature];
+                }
+            }
+        }
+    }
+
+    for (size_t batch = 0; batch < batches; ++batch) {
+        size_t batch_offset = batch * sequence * features;
+        uray_matmul(
+            sequence, features, features,
+            merged + batch_offset, weight_o, output + batch_offset
+        );
+        for (size_t position = 0; position < sequence; ++position) {
+            size_t row = batch_offset + position * features;
+            for (size_t out = 0; out < features; ++out) {
+                output[row + out] += bias_o[out];
+            }
+        }
+    }
+    free(projected);
+    free(key_transposed);
+    free(context);
+    (void)score_count;
+    return 0;
+}
+
+int uray_attention_backward(
+    size_t batches, size_t sequence, size_t features, size_t heads, int causal,
+    const double *input, const double *queries, const double *keys,
+    const double *values, const double *probabilities, const double *merged,
+    const double *weight_q, const double *weight_k,
+    const double *weight_v, const double *weight_o,
+    const double *grad_output,
+    double *grad_input, double *grad_weight_q, double *grad_weight_k,
+    double *grad_weight_v, double *grad_weight_o,
+    double *grad_bias_q, double *grad_bias_k,
+    double *grad_bias_v, double *grad_bias_o
+) {
+    size_t input_count, attention_count, score_count, matrix_count;
+    if (causal < 0 || causal > 1 ||
+        !attention_dimensions(
+            batches, sequence, features, heads, &input_count,
+            &attention_count, &score_count, &matrix_count
+        ) ||
+        input == NULL || queries == NULL || keys == NULL || values == NULL ||
+        probabilities == NULL || merged == NULL || weight_q == NULL ||
+        weight_k == NULL || weight_v == NULL || weight_o == NULL ||
+        grad_output == NULL || grad_input == NULL ||
+        grad_weight_q == NULL || grad_weight_k == NULL ||
+        grad_weight_v == NULL || grad_weight_o == NULL ||
+        grad_bias_q == NULL || grad_bias_k == NULL ||
+        grad_bias_v == NULL || grad_bias_o == NULL) {
+        return 1;
+    }
+
+    size_t depth = features / heads;
+    double scale = 1.0 / sqrt((double)depth);
+    size_t projected_count;
+    if (!checked_product(input_count, 3, &projected_count) ||
+        projected_count > SIZE_MAX / sizeof(double)) {
+        return 1;
+    }
+    double *grad_context = calloc(attention_count, sizeof(double));
+    double *grad_probabilities = calloc(score_count, sizeof(double));
+    double *grad_scores = calloc(score_count, sizeof(double));
+    double *grad_projected = calloc(projected_count, sizeof(double));
+    if (grad_context == NULL || grad_probabilities == NULL ||
+        grad_scores == NULL || grad_projected == NULL) {
+        free(grad_context);
+        free(grad_probabilities);
+        free(grad_scores);
+        free(grad_projected);
+        return 2;
+    }
+
+    memset(grad_input, 0, input_count * sizeof(double));
+    memset(grad_weight_q, 0, matrix_count * sizeof(double));
+    memset(grad_weight_k, 0, matrix_count * sizeof(double));
+    memset(grad_weight_v, 0, matrix_count * sizeof(double));
+    memset(grad_weight_o, 0, matrix_count * sizeof(double));
+    memset(grad_bias_q, 0, features * sizeof(double));
+    memset(grad_bias_k, 0, features * sizeof(double));
+    memset(grad_bias_v, 0, features * sizeof(double));
+    memset(grad_bias_o, 0, features * sizeof(double));
+
+    for (size_t batch = 0; batch < batches; ++batch) {
+        for (size_t position = 0; position < sequence; ++position) {
+            size_t row = (batch * sequence + position) * features;
+            for (size_t in = 0; in < features; ++in) {
+                double total = 0.0;
+                for (size_t out = 0; out < features; ++out) {
+                    double gradient = grad_output[row + out];
+                    grad_weight_o[in * features + out] +=
+                        merged[row + in] * gradient;
+                    total += gradient * weight_o[in * features + out];
+                }
+                grad_context[row + in] = total;
+            }
+            for (size_t out = 0; out < features; ++out) {
+                grad_bias_o[out] += grad_output[row + out];
+            }
+        }
+    }
+
+    for (size_t batch = 0; batch < batches; ++batch) {
+        for (size_t head = 0; head < heads; ++head) {
+            for (size_t position = 0; position < sequence; ++position) {
+                for (size_t feature = 0; feature < depth; ++feature) {
+                    double total = 0.0;
+                    for (size_t query = 0; query < sequence; ++query) {
+                        total += probabilities[attention_score_index(
+                            batch, head, query, position, heads, sequence
+                        )] * grad_context[
+                            (batch * sequence + query) * features +
+                            head * depth + feature
+                        ];
+                    }
+                    grad_projected[2 * input_count +
+                        (batch * sequence + position) * features +
+                        head * depth + feature] = total;
+                }
+            }
+            for (size_t query = 0; query < sequence; ++query) {
+                size_t score_row = attention_score_index(
+                    batch, head, query, 0, heads, sequence
+                );
+                double softmax_dot = 0.0;
+                for (size_t key = 0; key < sequence; ++key) {
+                    double total = 0.0;
+                    for (size_t feature = 0; feature < depth; ++feature) {
+                        total += grad_context[
+                            (batch * sequence + query) * features +
+                            head * depth + feature
+                        ] * values[attention_qkv_index(
+                            batch, head, key, feature,
+                            heads, sequence, depth
+                        )];
+                    }
+                    grad_probabilities[score_row + key] = total;
+                    softmax_dot += total * probabilities[score_row + key];
+                }
+                for (size_t key = 0; key < sequence; ++key) {
+                    size_t index = score_row + key;
+                    grad_scores[index] = causal && key > query ? 0.0 :
+                        probabilities[index] *
+                            (grad_probabilities[index] - softmax_dot);
+                }
+            }
+            for (size_t position = 0; position < sequence; ++position) {
+                for (size_t feature = 0; feature < depth; ++feature) {
+                    double query_gradient = 0.0;
+                    double key_gradient = 0.0;
+                    for (size_t other = 0; other < sequence; ++other) {
+                        query_gradient += grad_scores[attention_score_index(
+                            batch, head, position, other, heads, sequence
+                        )] * keys[attention_qkv_index(
+                            batch, head, other, feature,
+                            heads, sequence, depth
+                        )];
+                        key_gradient += grad_scores[attention_score_index(
+                            batch, head, other, position, heads, sequence
+                        )] * queries[attention_qkv_index(
+                            batch, head, other, feature,
+                            heads, sequence, depth
+                        )];
+                    }
+                    grad_projected[
+                        (batch * sequence + position) * features +
+                        head * depth + feature
+                    ] = scale * query_gradient;
+                    grad_projected[input_count +
+                        (batch * sequence + position) * features +
+                        head * depth + feature] = scale * key_gradient;
+                }
+            }
+        }
+    }
+
+    const double *projection_weights[3] = {
+        weight_q, weight_k, weight_v
+    };
+    double *projection_weight_grads[3] = {
+        grad_weight_q, grad_weight_k, grad_weight_v
+    };
+    double *projection_bias_grads[3] = {
+        grad_bias_q, grad_bias_k, grad_bias_v
+    };
+    for (size_t projection = 0; projection < 3; ++projection) {
+        const double *projected_gradient =
+            grad_projected + projection * input_count;
+        for (size_t batch = 0; batch < batches; ++batch) {
+            for (size_t position = 0; position < sequence; ++position) {
+                size_t row = (batch * sequence + position) * features;
+                for (size_t out = 0; out < features; ++out) {
+                    double gradient = projected_gradient[row + out];
+                    projection_bias_grads[projection][out] += gradient;
+                    for (size_t in = 0; in < features; ++in) {
+                        projection_weight_grads[projection][in * features + out]
+                            += input[row + in] * gradient;
+                        grad_input[row + in] +=
+                            gradient * projection_weights[projection][
+                                in * features + out
+                            ];
+                    }
+                }
+            }
+        }
+    }
+
+    free(grad_context);
+    free(grad_probabilities);
+    free(grad_scores);
+    free(grad_projected);
+    return 0;
+}
+
 static int conv2d_dimensions(
     size_t batches, size_t in_channels, size_t height, size_t width,
     size_t out_channels, size_t kernel_h, size_t kernel_w,

@@ -484,6 +484,14 @@ class NativeBackend:
             _SIZE_T, _VOID_P, _VOID_P, _VOID_P,
         ]
         self.library.uray_relu_backward.restype = None
+        self.library.uray_attention_forward.argtypes = (
+            [_SIZE_T] * 4 + [ctypes.c_int] + [_VOID_P] * 15
+        )
+        self.library.uray_attention_forward.restype = ctypes.c_int
+        self.library.uray_attention_backward.argtypes = (
+            [_SIZE_T] * 4 + [ctypes.c_int] + [_VOID_P] * 20
+        )
+        self.library.uray_attention_backward.restype = ctypes.c_int
 
     def matmul(self, left, right, validated=False):
         if validated:
@@ -515,6 +523,129 @@ class NativeBackend:
             raise RuntimeErrorUray("matmul: элементы должны быть конечными числами")
         self.library.uray_matmul(m, k, n, ap, bp, cp)
         return [list(c[row * n:(row + 1) * n]) for row in range(m)]
+
+    def multihead_attention_forward(
+        self, input_data, weights, biases, heads, causal
+    ):
+        from tensor import Tensor
+
+        original_shape = Tensor._shape_list(input_data)
+        squeeze_batch = len(original_shape) == 2
+        if squeeze_batch:
+            input_data = [input_data]
+            batches, sequence, features = 1, *original_shape
+        elif len(original_shape) == 3:
+            batches, sequence, features = original_shape
+        else:
+            raise RuntimeErrorUray(
+                "Нативный attention ожидает [sequence, features] "
+                "или [batch, sequence, features]"
+            )
+        if (
+            batches <= 0 or sequence <= 0 or features <= 0 or heads <= 0
+            or features % heads != 0
+            or len(weights) != 4 or len(biases) != 4
+        ):
+            raise RuntimeErrorUray("Неверные размерности нативного attention")
+
+        input_values = _flat_array(input_data, "attention input")
+        weight_values = [
+            _flat_array(value, "attention weight") for value in weights
+        ]
+        bias_values = [
+            _flat_array(value, "attention bias") for value in biases
+        ]
+        output_count = batches * sequence * features
+        attention_count = batches * sequence * features
+        score_count = batches * heads * sequence * sequence
+        output_values = array.array("d", [0.0]) * output_count
+        queries = array.array("d", [0.0]) * attention_count
+        keys = array.array("d", [0.0]) * attention_count
+        values = array.array("d", [0.0]) * attention_count
+        probabilities = array.array("d", [0.0]) * score_count
+        merged = array.array("d", [0.0]) * output_count
+        buffers = [
+            input_values, *weight_values, *bias_values, output_values,
+            queries, keys, values, probabilities, merged,
+        ]
+        pointer_refs = [
+            _array_pointer(buffer, ctypes.c_double) for buffer in buffers
+        ]
+        pointers = [pointer[0] for pointer in pointer_refs]
+        status = self.library.uray_attention_forward(
+            batches, sequence, features, heads, int(causal), *pointers
+        )
+        if status:
+            raise RuntimeErrorUray(
+                f"Нативный attention forward завершился с кодом ошибки {status}"
+            )
+        result_shape = (
+            [sequence, features] if squeeze_batch
+            else [batches, sequence, features]
+        )
+        context = {
+            "shape": (batches, sequence, features),
+            "squeeze_batch": squeeze_batch,
+            "heads": heads,
+            "causal": bool(causal),
+            "input": input_values,
+            "weights": weight_values,
+            "queries": queries,
+            "keys": keys,
+            "values": values,
+            "probabilities": probabilities,
+            "merged": merged,
+        }
+        return _nested_from_flat(output_values, result_shape), context
+
+    def multihead_attention_backward(self, gradient, context):
+        batches, sequence, features = context["shape"]
+        heads = context["heads"]
+        input_values = context["input"]
+        weight_values = context["weights"]
+        gradient_values = _flat_array(gradient, "attention gradient")
+        input_count = batches * sequence * features
+        matrix_count = features * features
+        grad_input = array.array("d", [0.0]) * input_count
+        grad_weights = [
+            array.array("d", [0.0]) * matrix_count for _ in range(4)
+        ]
+        grad_biases = [
+            array.array("d", [0.0]) * features for _ in range(4)
+        ]
+        buffers = [
+            input_values, context["queries"], context["keys"],
+            context["values"], context["probabilities"], context["merged"],
+            *weight_values, gradient_values, grad_input,
+            *grad_weights, *grad_biases,
+        ]
+        pointer_refs = [
+            _array_pointer(buffer, ctypes.c_double) for buffer in buffers
+        ]
+        pointers = [pointer[0] for pointer in pointer_refs]
+        status = self.library.uray_attention_backward(
+            batches, sequence, features, heads,
+            int(context["causal"]), *pointers
+        )
+        if status:
+            raise RuntimeErrorUray(
+                f"Нативный attention backward завершился с кодом ошибки {status}"
+            )
+        input_shape = (
+            [sequence, features] if context["squeeze_batch"]
+            else [batches, sequence, features]
+        )
+        return (
+            _nested_from_flat(grad_input, input_shape),
+            *[
+                _nested_from_flat(value, [features, features])
+                for value in grad_weights
+            ],
+            *[
+                _nested_from_flat(value, [features])
+                for value in grad_biases
+            ],
+        )
 
     def create_mlp_trainer(self, model, x_data, y_data, count, optimizer):
         return NativeMLPTrainer(self, model, x_data, y_data, count, optimizer)

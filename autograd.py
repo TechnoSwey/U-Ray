@@ -159,12 +159,15 @@ def _broadcast_binary(left, right, operation):
 
 
 def _flatten(value):
-    if isinstance(value, list):
-        result = []
-        for item in value:
-            result.extend(_flatten(item))
-        return result
-    return [value]
+    result = []
+    pending = [value]
+    while pending:
+        item = pending.pop()
+        if isinstance(item, list):
+            pending.extend(reversed(item))
+        else:
+            result.append(item)
+    return result
 
 
 def _from_flat(values, shape):
@@ -172,6 +175,26 @@ def _from_flat(values, shape):
         if len(values) != 1:
             raise RuntimeErrorUray("Неверное число элементов при reshape")
         return values[0]
+    if len(shape) == 2 and shape[0] > 0 and shape[1] > 0:
+        rows, columns = shape
+        if rows * columns != len(values):
+            raise RuntimeErrorUray("Неверное число элементов при reshape")
+        return [
+            values[start:start + columns]
+            for start in range(0, len(values), columns)
+        ]
+    if len(shape) == 3 and all(dimension > 0 for dimension in shape):
+        batches, rows, columns = shape
+        if batches * rows * columns != len(values):
+            raise RuntimeErrorUray("Неверное число элементов при reshape")
+        plane = rows * columns
+        return [
+            [
+                values[start + row * columns:start + (row + 1) * columns]
+                for row in range(rows)
+            ]
+            for start in range(0, len(values), plane)
+        ]
     size = shape[0]
     tail_size = math.prod(shape[1:]) if len(shape) > 1 else 1
     return [
@@ -347,7 +370,7 @@ class GradTensor(Tensor):
                 _unbroadcast(grad, right_shape),
             )
 
-        return self._result(result, (self, other), backward)
+        return self._result_owned(result, (self, other), backward)
 
     def sub(self, other):
         other = as_grad_tensor(other)
@@ -367,7 +390,7 @@ class GradTensor(Tensor):
                 _unbroadcast(_scale_data(grad, -1.0), right_shape),
             )
 
-        return self._result(result, (self, other), backward)
+        return self._result_owned(result, (self, other), backward)
 
     def mul(self, other):
         other = as_grad_tensor(other)
@@ -394,7 +417,7 @@ class GradTensor(Tensor):
                 _unbroadcast(right_grad, right_shape),
             )
 
-        return self._result(result, (self, other), backward)
+        return self._result_owned(result, (self, other), backward)
 
     def div(self, other):
         other = as_grad_tensor(other)
@@ -509,7 +532,7 @@ class GradTensor(Tensor):
                 _matmul(_transpose(self.data), grad),
             )
 
-        return self._result(result, (self, other), backward)
+        return self._result_owned(result, (self, other), backward)
 
     def transpose(self):
         data = _transpose(self.data)
@@ -1298,7 +1321,7 @@ class GradTensor(Tensor):
                     _array_to_data(grad_bias),
                 )
 
-            return self._result(
+            return self._result_owned(
                 _array_to_data(output), (self, weight, bias), backward
             )
 
@@ -1494,8 +1517,9 @@ class GradTensor(Tensor):
         )
 
         def backward(gradient):
+            flat_gradient = _flatten(gradient)
             grad_groups = [
-                _flatten(gradient)[index:index + features]
+                flat_gradient[index:index + features]
                 for index in range(0, len(flat), features)
             ]
             input_groups = []
@@ -1529,7 +1553,7 @@ class GradTensor(Tensor):
                 bias_grad,
             )
 
-        return self._result(
+        return self._result_owned(
             output_data, (self, weight, bias), backward
         )
 
@@ -1573,6 +1597,21 @@ class GradTensor(Tensor):
         depth = features // heads
         scale = 1.0 / math.sqrt(depth)
         parents = (self, *weights, *biases)
+        native = get_native()
+        if native is not None:
+            output_data, cache = native.multihead_attention_forward(
+                self.data,
+                [weight.data for weight in weights],
+                [bias.data for bias in biases],
+                heads,
+                causal,
+            )
+
+            def backward(gradient):
+                return native.multihead_attention_backward(gradient, cache)
+
+            return self._result_owned(output_data, parents, backward)
+
         np = get_numpy()
 
         if np is not None:
