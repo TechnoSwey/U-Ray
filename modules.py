@@ -8,7 +8,7 @@ import random as _pyrandom
 import values
 from errors import RuntimeErrorUray as R
 from values import DictValue, Builtin, Module, Function
-from tensor import Tensor, get_numpy
+from tensor import Tensor, get_numpy, get_native
 from autograd import GradTensor, as_grad_tensor
 from mnist import MNISTView, load_mnist_directory
 from datasets import download_mnist_directory, load_csv_dataset
@@ -2370,10 +2370,13 @@ class ModuleRegistry:
                 return []
             _validate_mnist_model(model, X, None, "nn.predict")
             numpy = get_numpy()
+            native = get_native()
+            if native is not None:
+                return native.predict_mlp(model, X, count)
             if numpy is None and isinstance(X, MNISTView) and count >= 10000:
                 raise R(
-                    "nn.predict: полный MNIST требует NumPy; "
-                    "запустите uray с --backend=numpy"
+                    "nn.predict: полный MNIST требует --backend=native "
+                    "или --backend=numpy"
                 )
             if numpy is not None:
                 if count == _dataset_length(X, "nn.predict"):
@@ -2405,10 +2408,13 @@ class ModuleRegistry:
                 raise R(f"nn.evaluate: неизвестная функция потерь {loss_name!r}")
             _validate_mnist_model(model, X, Y, "nn.evaluate")
             numpy = get_numpy()
+            native = get_native()
+            if native is not None:
+                return native.evaluate_mlp(model, X, Y, loss_name)
             if numpy is None and isinstance(X, MNISTView) and count >= 10000:
                 raise R(
-                    "nn.evaluate: полный MNIST требует NumPy; "
-                    "запустите uray с --backend=numpy"
+                    "nn.evaluate: полный MNIST требует --backend=native "
+                    "или --backend=numpy"
                 )
             if numpy is not None:
                 return _numpy_evaluate(model, X, Y, loss_name, numpy)
@@ -2463,16 +2469,47 @@ class ModuleRegistry:
             if opt_name not in ("sgd", "momentum", "adam"):
                 raise R(f"nn.train: неизвестный оптимизатор {opt_name!r}")
             numpy = get_numpy()
-            if numpy is None and isinstance(X, MNISTView) and count >= 10000:
+            native = get_native()
+            if (
+                numpy is None and native is None
+                and isinstance(X, MNISTView) and count >= 10000
+            ):
                 raise R(
-                    "nn.train: полный MNIST требует NumPy; "
-                    "запустите uray с --backend=numpy"
+                    "nn.train: полный MNIST требует --backend=native "
+                    "или --backend=numpy"
                 )
             if numpy is not None:
                 return _numpy_train(
                     model, X, Y, epochs, lr, batch_size, loss_name,
                     opt_name, show_progress, numpy, count
                 )
+            if native is not None:
+                trainer = native.create_mlp_trainer(
+                    model, X, Y, count, opt_name
+                )
+                history = []
+                indices = list(range(count))
+                for epoch in range(epochs):
+                    _pyrandom.shuffle(indices)
+                    mean_loss = trainer.train_epoch(
+                        indices, batch_size, lr, loss_name
+                    )
+                    history.append(mean_loss)
+                    if show_progress:
+                        width = 20
+                        current = epoch + 1
+                        filled = int(width * current / epochs)
+                        bar = "█" * filled + "░" * (width - filled)
+                        pct = int(100 * current / epochs)
+                        print(
+                            f"\r[{bar}] {pct}% loss: {mean_loss:.6g}",
+                            end="",
+                            flush=True,
+                        )
+                        if current == epochs:
+                            print()
+                trainer.sync_model()
+                return history
             state = None
             if opt_name == "adam": state = adam_init([model])
             elif opt_name == "momentum": state = momentum_init([model])

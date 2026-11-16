@@ -333,9 +333,10 @@ loaded = nn.load_layers("model.json")
 `nn.train_layers` поддерживает loss `"cce"`, `"bce"` (логиты) и `"mse"`,
 оптимизаторы `"adam"` и `"sgd"`. `show_progress` по умолчанию включён. Для
 изображений укажи `input_shape`, например `[1, 28, 28]`; шкала обновляется по
-мини-батчам. NumPy backend ускоряет
-`matmul`, свёртки и pooling; на стандартном Python backend подходят небольшие
-датасеты и проверки.
+мини-батчам. Встроенный `native` backend ускоряет плотные MLP-слои и их
+обучение без NumPy; NumPy backend ускоряет `matmul`, свёртки и pooling в
+составных autodiff/CNN-моделях. На стандартном Python backend удобно проверять
+небольшие датасеты и примеры.
 
 Сохранение модели включает параметры BatchNorm, running statistics, Dropout и
 вложенные residual-ветви; при загрузке восстановленные слои готовы к оценке
@@ -448,18 +449,35 @@ scores = nn.predict(model, [image])
 вектор-метку. `nn.predict(model, X[, limit])` возвращает вероятности классов;
 необязательный `limit` ограничивает число предсказаний.
 
-Для полного набора используй NumPy-бэкенд: он считает прямой и обратный проход
-целыми мини-батчами. Установи необязательную зависимость и запусти пример:
+Для обычной MLP можно обучать полный MNIST встроенным нативным CPU backend без
+NumPy. При первом запуске нужен системный C-компилятор (`cc`, `clang` или
+`gcc`); исходник ядра входит в U-Ray и кэшируется после сборки:
 
 ```
-python3 -m pip install numpy
 python3 examples/download_mnist.py
-./uray examples/mnist.ur --backend=numpy
+./uray examples/mnist.ur --backend=native
 ```
 
-Без NumPy маленькие наборы работают на стандартном Python backend. Для полного
-MNIST обучение, оценка и предсказание намеренно требуют `--backend=numpy`, чтобы
-не начинать многочасовые циклы по одному изображению.
+Этот backend ускоряет `nn.mlp`, `nn.train`, `nn.evaluate` и `nn.predict`;
+AVX-512 и AVX2 выбираются автоматически, иначе используется переносимый
+скалярный код. NumPy backend по-прежнему нужен для некоторых составных
+autodiff/CNN-путей, например:
+
+```
+./uray examples/mnist_cnn.ur --backend=numpy
+```
+
+Для сравнения полного обучения и оценки MLP на всех 60 000 train и 10 000 test
+изображениях запусти:
+
+```
+python3 benchmarks/benchmark_mnist.py
+```
+
+Для контрольной стороны этого замера нужен NumPy; сам запуск U-Ray с
+`--backend=native` его не использует. Скрипт сравнивает одинаковую модель и
+один цикл train+evaluate, а также показывает отношение времени нативного
+backend к NumPy на текущем компьютере.
 
 ---
 

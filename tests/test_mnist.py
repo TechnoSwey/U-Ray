@@ -185,6 +185,10 @@ class MNISTTests(unittest.TestCase):
             import numpy  # noqa: F401
         except ImportError:
             self.skipTest("NumPy is optional")
+        try:
+            set_backend("native")
+        except RuntimeErrorUray as error:
+            self.skipTest(str(error))
 
         examples = [
             (
@@ -207,7 +211,7 @@ class MNISTTests(unittest.TestCase):
 
         for sizes, act, out_act, loss, X, Y in examples:
             metrics = []
-            for backend in ("python", "numpy"):
+            for backend in ("python", "numpy", "native"):
                 set_backend(backend)
                 self.nn.members["rand_seed"].fn([23])
                 model = self.nn.members["mlp"].fn([sizes, act, out_act])
@@ -217,8 +221,57 @@ class MNISTTests(unittest.TestCase):
                 metrics.append(self.nn.members["evaluate"].fn([
                     model, X, Y, loss
                 ]))
-            self.assertAlmostEqual(metrics[0][0], metrics[1][0], places=6)
-            self.assertEqual(metrics[0][1], metrics[1][1])
+            for candidate in metrics[1:]:
+                self.assertAlmostEqual(metrics[0][0], candidate[0], places=6)
+                self.assertEqual(metrics[0][1], candidate[1])
+
+    def test_native_backend_trains_and_evaluates_lazy_mnist(self):
+        try:
+            import numpy  # noqa: F401
+        except ImportError:
+            self.skipTest("NumPy is needed only as the comparison backend")
+        try:
+            set_backend("native")
+        except RuntimeErrorUray as error:
+            self.skipTest(str(error))
+
+        data = self._load()
+        results = []
+        for backend in ("numpy", "native"):
+            set_backend(backend)
+            self.nn.members["rand_seed"].fn([17])
+            model = self.nn.members["mlp"].fn([
+                [784, 64, 10], "relu", "softmax"
+            ])
+            self.nn.members["rand_seed"].fn([29])
+            history = self.nn.members["train"].fn([
+                model,
+                data["train"]["X"],
+                data["train"]["Y"],
+                2,
+                0.01,
+                2,
+                "cce",
+                "adam",
+                False,
+            ])
+            metrics = self.nn.members["evaluate"].fn([
+                model,
+                data["test"]["X"],
+                data["test"]["Y"],
+                "cce",
+            ])
+            predictions = self.nn.members["predict"].fn([
+                model, data["test"]["X"], 1
+            ])
+            results.append((history, metrics, predictions))
+
+        for native_value, numpy_value in zip(results[1][0], results[0][0]):
+            self.assertAlmostEqual(native_value, numpy_value, places=5)
+        self.assertAlmostEqual(results[1][1][0], results[0][1][0], places=5)
+        self.assertEqual(results[1][1][1], results[0][1][1])
+        self.assertEqual(len(results[1][2]), 1)
+        self.assertEqual(len(results[1][2][0]), 10)
 
 
 if __name__ == "__main__":

@@ -6,6 +6,7 @@ from errors import RuntimeErrorUray
 
 _backend = "python"
 _numpy = None
+_native = None
 
 
 def get_numpy():
@@ -13,12 +14,24 @@ def get_numpy():
     return _numpy
 
 
+def get_native():
+    """Return the loaded U-Ray native engine, or None for another backend."""
+    return _native
+
+
 def set_backend(name):
     """Select the implementation used for tensor math operations."""
-    global _backend, _numpy
+    global _backend, _numpy, _native
     if name == "python":
         _backend = "python"
         _numpy = None
+        _native = None
+        return
+    if name == "native":
+        from native_backend import load_native
+        _native = load_native()
+        _numpy = None
+        _backend = "native"
         return
     if name != "numpy":
         raise RuntimeErrorUray(f"Неизвестный backend тензоров {name!r}")
@@ -29,6 +42,7 @@ def set_backend(name):
             "Backend numpy требует NumPy. Установите его командой: "
             "python3 -m pip install numpy"
         ) from e
+    _native = None
     _backend = "numpy"
 
 class Tensor:
@@ -228,6 +242,8 @@ class Tensor:
                     f"Несовместимые размерности тензоров для matmul: {e}"
                 ) from e
             return Tensor(result.tolist())
+        if _backend == "native":
+            return Tensor(_native.matmul(self._data, other._data))
         return Tensor(Tensor._matmul(self._data, other._data))
 
     @staticmethod

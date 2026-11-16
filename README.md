@@ -60,7 +60,7 @@ python3 main.py examples/save_load.ur
 ./uray --version
 ./uray --repl
 ./uray examples/numpy_backend.ur --backend=numpy
-./uray examples/mnist.ur --backend=numpy
+./uray examples/mnist.ur --backend=native
 ./uray examples/mnist_cnn.ur --backend=numpy
 ./uray examples/tabular_classification.ur
 ./uray check examples/mlp_xor.ur
@@ -68,11 +68,14 @@ python3 main.py examples/save_load.ur
 ./uray fmt --write examples/mlp_xor.ur
 ```
 
-Без имени файла `uray` тоже открывает REPL. Базовый backend не требует
-сторонних библиотек; `--backend=numpy` ускоряет тензорные операции, если
-установлен NumPy (`python3 -m pip install numpy`); для MLP он также включает
-векторизованное обучение мини-батчами, а общий autodiff backend ускоряет
-матричные операции и свёртки. `nn.load_mnist("data/mnist", true)` скачивает
+Без имени файла `uray` тоже открывает REPL. Стандартный `python` backend не
+требует сторонних библиотек. `--backend=native` использует встроенные C-ядра
+для обучения, оценки и предсказания обычных MLP, не импортирует NumPy и не
+зависит от сторонних ML-библиотек. При первом запуске он собирает исходник
+ядра системным C-компилятором (`cc`, `clang` или `gcc`) и кэширует его во
+временном каталоге; на Windows нативная сборка пока не поддерживается.
+`--backend=numpy` остаётся дополнительным вариантом для NumPy-ускорения и
+компонуемых CNN/autodiff-примеров. `nn.load_mnist("data/mnist", true)` скачивает
 недостающие стандартные архивы, проверяет IDX-структуру и возвращает train/test
 без разворачивания всех изображений в Python-списки. `nn.load_csv(...)`
 загружает числовые признаки из CSV, воспроизводимо делит данные на train/test,
@@ -86,8 +89,8 @@ python3 main.py examples/save_load.ur
 
 | Язык | Математика | Машинное обучение |
 | --- | --- | --- |
-| Функции, рекурсия, условия и циклы | Встроенные `math` и `linalg` | `nn`: MLP, autodiff, CNN и Transformer |
-| Списки, словари, кортежи и строки | Python по умолчанию, NumPy по выбору | Dense-, сверточные и residual-блоки |
+| Функции, рекурсия, условия и циклы | Встроенные `math` и `linalg` | `nn`: MLP, native CPU backend, autodiff, CNN и Transformer |
+| Списки, словари, кортежи и строки | Python по умолчанию, native C и NumPy по выбору | Dense-, сверточные и residual-блоки |
 | Деструктуризация структур в `match` | Self-attention с causal-маской | BatchNorm, LayerNorm, Dropout и Adam |
 | REPL с Tab-дополнением и CLI | `uray fmt` для единого стиля | Предварительная проверка размерностей ML |
 | Сохранение и загрузка моделей | Без обязательных зависимостей | Подсветка для VS Code и Termux |

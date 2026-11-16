@@ -14,7 +14,7 @@ nn.rand_seed(42)
 model = nn.mlp([784, 64, 10], "relu", "softmax")
 nn.summary(model)
 
-// Для полного набора используй --backend=numpy.
+// Для обучения полного набора без NumPy используй --backend=native.
 history = nn.train(
     model,
     train["X"],
