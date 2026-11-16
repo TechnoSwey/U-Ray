@@ -2,10 +2,13 @@ import copy
 import math
 import tempfile
 import unittest
+import weakref
 from pathlib import Path
 
 from autograd import GradTensor
+from errors import RuntimeErrorUray
 from modules import ModuleRegistry
+from mnist import MNISTView, _MNISTStorage
 from tensor import get_numpy, set_backend
 
 
@@ -64,6 +67,16 @@ class AutogradTests(unittest.TestCase):
         self.assertEqual(x.grad, [1.0, 2.0])
         self.assertEqual(loss._parents, ())
         self.assertIsNone(loss._backward_fn)
+
+    def test_backward_does_not_keep_intermediate_tensors_alive(self):
+        value = GradTensor([1.0, -2.0], requires_grad=True)
+        intermediate = value.relu()
+        intermediate_ref = weakref.ref(intermediate)
+        loss = intermediate.sum_all()
+        loss.backward()
+
+        del intermediate
+        self.assertIsNone(intermediate_ref())
 
     def test_matmul_gradient_matches_finite_difference(self):
         left = [[0.2, -0.4], [0.7, 0.3]]
@@ -170,6 +183,44 @@ class AutogradTests(unittest.TestCase):
         params = self.nn.members["parameters"].fn([model])
         self.assertEqual(len(params), 4)
         self.assertTrue(all(param.grad is not None for param in params))
+
+    def test_batched_image_reshape_fast_paths_preserve_gradients(self):
+        image_batch = [
+            [
+                [[0.0, 1.0], [2.0, 3.0]],
+                [[4.0, 5.0], [6.0, 7.0]],
+            ],
+            [
+                [[8.0, 9.0], [10.0, 11.0]],
+                [[12.0, 13.0], [14.0, 15.0]],
+            ],
+        ]
+        for backend in ("python", "native"):
+            try:
+                set_backend(backend)
+            except RuntimeErrorUray as error:
+                if backend == "native":
+                    self.skipTest(str(error))
+                raise
+
+            images = GradTensor(copy.deepcopy(image_batch), True)
+            rows = images.reshape([2, -1])
+            self.assertEqual(rows.data, [list(range(8)), list(range(8, 16))])
+            rows.data[0][0] = -100.0
+            self.assertEqual(images.data[0][0][0][0], 0.0)
+            rows.sum_all().backward()
+            self.assertEqual(
+                images.grad,
+                [[[[1.0, 1.0], [1.0, 1.0]], [[1.0, 1.0], [1.0, 1.0]]]] * 2,
+            )
+
+            flat = GradTensor(
+                [list(range(8)), list(range(8, 16))], requires_grad=True
+            )
+            restored = flat.reshape([2, 2, 2, 2])
+            self.assertEqual(restored.data, image_batch)
+            restored.sum_all().backward()
+            self.assertEqual(flat.grad, [[1.0] * 8, [1.0] * 8])
 
     def test_sequential_model_save_load_preserves_output(self):
         self.nn.members["rand_seed"].fn([13])
@@ -609,6 +660,38 @@ class AutogradTests(unittest.TestCase):
         ])
         self.assertEqual(len(history), 1)
         self.assertTrue(math.isfinite(history[0]))
+        self.assertIsNone(get_numpy())
+
+    def test_native_cnn_training_accepts_owned_mnist_batches(self):
+        try:
+            set_backend("native")
+        except RuntimeErrorUray as error:
+            self.skipTest(str(error))
+        storage = _MNISTStorage(
+            bytes(index % 256 for index in range(2 * 28 * 28)),
+            bytes([0, 1]),
+            2,
+            28,
+            28,
+        )
+        images = MNISTView(storage, "images")
+        labels = MNISTView(storage, "labels")
+        model = self.nn.members["sequential"].fn([[
+            self.nn.members["conv2d_layer"].fn([1, 2, 3, 1, 1]),
+            self.nn.members["activation_layer"].fn(["relu"]),
+            self.nn.members["max_pool2d_layer"].fn([2, 2]),
+            self.nn.members["flatten_layer"].fn([]),
+            self.nn.members["linear_layer"].fn([2 * 14 * 14, 10]),
+        ]])
+        history = self.nn.members["train_layers"].fn([
+            model, images, labels, 1, 0.001, 2, "cce", "adam", False, [1, 28, 28]
+        ])
+        metrics = self.nn.members["evaluate_layers"].fn([
+            model, images, labels, "cce", [1, 28, 28]
+        ])
+        self.assertEqual(len(history), 1)
+        self.assertTrue(math.isfinite(history[0]))
+        self.assertTrue(math.isfinite(metrics[0]))
         self.assertIsNone(get_numpy())
 
     def test_numpy_matmul_graph_matches_python_when_available(self):

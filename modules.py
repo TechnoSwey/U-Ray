@@ -580,7 +580,9 @@ class ModuleRegistry:
                     weights = layer["W"]
                     if len(output.shape()) == 1:
                         output = weights.matmul(output)
-                    elif len(output.shape()) >= 2:
+                    elif len(output.shape()) == 2:
+                        output = output.matmul(weights.transpose())
+                    elif len(output.shape()) > 2:
                         source_shape = output.shape()
                         output = output.reshape([-1, source_shape[-1]])
                         output = output.matmul(weights.transpose())
@@ -709,8 +711,11 @@ class ModuleRegistry:
                 return logits.mse_loss(target)
             raise R(f"nn: неизвестная функция потерь {loss_name!r}")
 
-        def _prepare_graph_input(batch, input_shape):
-            value = as_grad_tensor(batch)
+        def _prepare_graph_input(batch, input_shape, owned=False):
+            value = (
+                GradTensor._from_owned(batch)
+                if owned else as_grad_tensor(batch)
+            )
             if input_shape is not None:
                 if not isinstance(input_shape, list) or any(
                     not isinstance(dim, int) or isinstance(dim, bool) or dim <= 0
@@ -719,6 +724,11 @@ class ModuleRegistry:
                     raise R("input_shape должен содержать положительные целые размеры")
                 value = value.reshape([len(batch)] + input_shape)
             return value
+
+        def _autograd_batch_tensor(view, batch):
+            if isinstance(view, MNISTView):
+                return GradTensor._from_owned(batch)
+            return as_grad_tensor(batch)
 
         def train_layers(args):
             if len(args) < 6 or len(args) > 10:
@@ -773,8 +783,10 @@ class ModuleRegistry:
                     indices = order[start:start + batch_size]
                     x_batch = _autograd_batch(X, indices, "train_layers")
                     y_batch = _autograd_batch(Y, indices, "train_layers")
-                    x_value = _prepare_graph_input(x_batch, input_shape)
-                    y_value = as_grad_tensor(y_batch)
+                    x_value = _prepare_graph_input(
+                        x_batch, input_shape, isinstance(X, MNISTView)
+                    )
+                    y_value = _autograd_batch_tensor(Y, y_batch)
                     logits = forward_layers([model, x_value, True])
                     loss_value = _autograd_loss(logits, y_value, loss_name)
                     loss_value.backward()
@@ -825,9 +837,13 @@ class ModuleRegistry:
                 x_batch = _autograd_batch(X, indices, "evaluate_layers")
                 y_batch = _autograd_batch(Y, indices, "evaluate_layers")
                 logits = forward_layers([
-                    model, _prepare_graph_input(x_batch, input_shape), False
+                    model,
+                    _prepare_graph_input(
+                        x_batch, input_shape, isinstance(X, MNISTView)
+                    ),
+                    False,
                 ])
-                target = as_grad_tensor(y_batch)
+                target = _autograd_batch_tensor(Y, y_batch)
                 total_loss += _autograd_loss(logits, target, loss_name).item() * len(indices)
                 output = logits.data
                 if len(logits.shape()) == 2:
@@ -860,7 +876,11 @@ class ModuleRegistry:
                 indices = list(range(start, min(start + 256, count)))
                 x_batch = _autograd_batch(X, indices, "predict_layers")
                 logits = forward_layers([
-                    model, _prepare_graph_input(x_batch, input_shape), False
+                    model,
+                    _prepare_graph_input(
+                        x_batch, input_shape, isinstance(X, MNISTView)
+                    ),
+                    False,
                 ])
                 if len(logits.shape()) == 2 and logits.shape()[1] == 1:
                     probabilities = logits.sigmoid().data

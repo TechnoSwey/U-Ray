@@ -175,18 +175,20 @@ def _flat_array(data, name):
 
 def _nested_from_flat(values, shape):
     if len(shape) == 4:
-        iterator = iter(values)
+        flat_values = list(values)
+        offset = 0
         batches, channels, height, width = shape
-        return [
-            [
-                [
-                    [next(iterator) for _ in range(width)]
-                    for _ in range(height)
-                ]
-                for _ in range(channels)
-            ]
-            for _ in range(batches)
-        ]
+        result = []
+        for _ in range(batches):
+            batch = []
+            for _ in range(channels):
+                channel = []
+                for _ in range(height):
+                    channel.append(flat_values[offset:offset + width])
+                    offset += width
+                batch.append(channel)
+            result.append(batch)
+        return result
 
     def build(offset, dimensions):
         if not dimensions:

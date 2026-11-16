@@ -180,6 +180,31 @@ def _from_flat(values, shape):
     ]
 
 
+def _flatten_image_batch(data):
+    return [
+        [value for channel in sample for row in channel for value in row]
+        for sample in data
+    ]
+
+
+def _rows_to_image_batch(data, shape):
+    _, channels, height, width = shape
+    plane_size = height * width
+    return [
+        [
+            [
+                sample[
+                    channel * plane_size + row * width:
+                    channel * plane_size + (row + 1) * width
+                ]
+                for row in range(height)
+            ]
+            for channel in range(channels)
+        ]
+        for sample in data
+    ]
+
+
 def _transpose(data):
     if not isinstance(data, list) or not data or not isinstance(data[0], list):
         raise RuntimeErrorUray("Транспонирование ожидает двумерный тензор")
@@ -273,6 +298,18 @@ class GradTensor(Tensor):
         self._parents = tuple(parents)
         self._backward_fn = backward_fn
         self._graph_consumed = False
+
+    @classmethod
+    def _from_owned(cls, data, requires_grad=False):
+        """Wrap freshly-created data without recopying or revalidating it."""
+        result = cls.__new__(cls)
+        result._data = data
+        result.requires_grad = bool(requires_grad)
+        result.grad = None
+        result._parents = ()
+        result._backward_fn = None
+        result._graph_consumed = False
+        return result
 
     def _result(self, data, parents, backward_fn):
         return GradTensor(
@@ -488,7 +525,8 @@ class GradTensor(Tensor):
             )
         values = None
         np = get_numpy()
-        size = _count(self.data)
+        old_shape = self.shape()
+        size = math.prod(old_shape)
         if -1 in shape:
             known = math.prod(dim for dim in shape if dim != -1)
             if known == 0 or size % known:
@@ -498,7 +536,6 @@ class GradTensor(Tensor):
             raise RuntimeErrorUray(
                 f"reshape: {size} элементов нельзя разместить в форме {shape}"
             )
-        old_shape = self.shape()
         if np is not None:
             data = _array_to_data(
                 np.asarray(self.data, dtype=float).reshape(shape)
@@ -506,11 +543,27 @@ class GradTensor(Tensor):
             backward = lambda grad: (
                 _array_to_data(np.asarray(grad).reshape(old_shape)),
             )
+        elif (
+            len(old_shape) == 2
+            and len(shape) == 4
+            and old_shape[0] == shape[0]
+            and old_shape[1] == math.prod(shape[1:])
+        ):
+            data = _rows_to_image_batch(self.data, shape)
+            backward = lambda grad: (_flatten_image_batch(grad),)
+        elif (
+            len(old_shape) == 4
+            and len(shape) == 2
+            and old_shape[0] == shape[0]
+            and math.prod(old_shape[1:]) == shape[1]
+        ):
+            data = _flatten_image_batch(self.data)
+            backward = lambda grad: (_rows_to_image_batch(grad, old_shape),)
         else:
             values = _flatten(self.data)
             data = _from_flat(values, shape)
             backward = lambda grad: (_from_flat(_flatten(grad), old_shape),)
-        return self._result(
+        return self._result_owned(
             data,
             (self,),
             backward,
@@ -519,7 +572,7 @@ class GradTensor(Tensor):
     def flatten(self, preserve_batch=True):
         if preserve_batch and len(self.shape()) >= 2:
             return self.reshape([self.shape()[0], -1])
-        return self.reshape([_count(self.data)])
+        return self.reshape([math.prod(self.shape())])
 
     def sum_all(self):
         data = _sum_data(self.data)
@@ -541,7 +594,7 @@ class GradTensor(Tensor):
         )
 
     def mean(self):
-        size = _count(self.data)
+        size = math.prod(self.shape())
         if size == 0:
             raise RuntimeErrorUray("mean от пустого тензора")
         return self.sum_all().scalar_mul(1.0 / size)
@@ -557,13 +610,11 @@ class GradTensor(Tensor):
     def relu(self):
         np = get_numpy()
         native = get_native()
-        owns_output = False
         if np is not None:
             array = np.asarray(self.data, dtype=float)
             output = _array_to_data(np.maximum(array, 0.0))
         elif native is not None:
             output, context = native.relu_forward(self.data)
-            owns_output = True
         else:
             array = None
             output = _map(self.data, lambda x: max(0.0, x))
@@ -581,9 +632,7 @@ class GradTensor(Tensor):
                 ),
             )
 
-        if owns_output:
-            return self._result_owned(output, (self,), backward)
-        return self._result(output, (self,), backward)
+        return self._result_owned(output, (self,), backward)
 
     def sigmoid(self):
         np = get_numpy()
@@ -694,7 +743,7 @@ class GradTensor(Tensor):
             raise RuntimeErrorUray(
                 f"MSE ожидает одинаковые формы, получено {left_shape} и {right_shape}"
             )
-        size = _count(self.data)
+        size = math.prod(left_shape)
         if size == 0:
             raise RuntimeErrorUray("MSE от пустого тензора")
         diffs = _zip_map(self.data, target.data, lambda a, b: a - b)
@@ -778,7 +827,7 @@ class GradTensor(Tensor):
             raise RuntimeErrorUray(
                 "binary_cross_entropy ожидает вероятности и labels одинаковой формы"
             )
-        size = _count(self.data)
+        size = math.prod(self.shape())
         eps = 1e-12
         loss = 0.0
         gradients = []
@@ -805,7 +854,7 @@ class GradTensor(Tensor):
             raise RuntimeErrorUray(
                 "binary_cross_entropy ожидает logits и labels одинаковой ненулевой формы"
             )
-        size = _count(self.data)
+        size = math.prod(self.shape())
         loss = _zip_map(
             self.data,
             target.data,
@@ -861,7 +910,6 @@ class GradTensor(Tensor):
 
         np = get_numpy()
         native = get_native()
-        owns_output = False
         if np is not None:
             x_array = np.asarray(x_data, dtype=float)
             w_array = np.asarray(weight.data, dtype=float)
@@ -905,13 +953,9 @@ class GradTensor(Tensor):
                 return tuple(grad_values)
         elif native is not None:
             output_data, context = native.conv2d_forward(
-                x_data,
-                weight.data,
-                bias_tensor.data if bias_tensor is not None else None,
-                stride,
-                padding,
+                x_data, weight.data,
+                bias_tensor.data if bias_tensor is not None else None, stride, padding,
             )
-            owns_output = True
 
             def backward(grad):
                 grad_batches = [grad] if squeeze_batch else grad
@@ -990,9 +1034,7 @@ class GradTensor(Tensor):
                 return tuple(result)
         if squeeze_batch:
             output_data = output_data[0]
-        if owns_output:
-            return self._result_owned(output_data, parents, backward)
-        return self._result(output_data, parents, backward)
+        return self._result_owned(output_data, parents, backward)
 
     def max_pool2d(self, kernel_size=2, stride=None):
         if stride is None:
@@ -1018,7 +1060,6 @@ class GradTensor(Tensor):
             raise RuntimeErrorUray("max_pool2d: окно больше входного изображения")
         np = get_numpy()
         native = get_native()
-        owns_output = False
         if np is not None:
             array = np.asarray(x_data, dtype=float)
             windows = np.lib.stride_tricks.sliding_window_view(
@@ -1041,7 +1082,6 @@ class GradTensor(Tensor):
             output_data, context = native.max_pool2d_forward(
                 x_data, kernel_size, stride
             )
-            owns_output = True
 
             def backward(grad):
                 grad_batches = [grad] if squeeze_batch else grad
@@ -1091,9 +1131,7 @@ class GradTensor(Tensor):
                 return (grad_input[0] if squeeze_batch else grad_input,)
         if squeeze_batch:
             output_data = output_data[0]
-        if owns_output:
-            return self._result_owned(output_data, (self,), backward)
-        return self._result(output_data, (self,), backward)
+        return self._result_owned(output_data, (self,), backward)
 
     def batch_norm(
         self,
@@ -1748,17 +1786,18 @@ class GradTensor(Tensor):
 
         topology = []
         visited = set()
-
-        def visit(node):
-            if id(node) in visited:
-                return
-            visited.add(id(node))
-            for parent in node._parents:
-                if parent.requires_grad:
-                    visit(parent)
-            topology.append(node)
-
-        visit(self)
+        stack = [(self, False)]
+        while stack:
+            node, expanded = stack.pop()
+            node_id = id(node)
+            if expanded:
+                topology.append(node)
+            elif node_id not in visited:
+                visited.add(node_id)
+                stack.append((node, True))
+                for parent in reversed(node._parents):
+                    if parent.requires_grad:
+                        stack.append((parent, False))
         gradients = {id(self): gradient}
         for node in reversed(topology):
             node_gradient = gradients.get(id(node))
