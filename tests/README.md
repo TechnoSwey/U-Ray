@@ -2,9 +2,9 @@
 
 Большинство тестов — `.ur`-файлы с ожидаемым выводом в `.expected`.
 Дополнительно runner проверяет CLI, а Python unit-тесты — formatter, REPL
-completion, статические размерности, VS Code manifest, PyTorch export и
-пустые тензоры. Проверка NumPy backend и соответствующий unit-тест
-пропускаются, если NumPy не установлен.
+completion, статические размерности, VS Code manifest, PyTorch export,
+пустые тензоры и MNIST IDX-загрузчик. NumPy-тесты пропускаются, если
+зависимость не установлена.
 
 ## Как запускать
 
@@ -34,6 +34,7 @@ import_file.ur import из файлов
 ml_xor.ur ML: XOR (accuracy = 1.0)
 ml_spirals.ur ML: спирали (accuracy > 0.9)
 ml_multiclass.ur ML: 3 класса, softmax
+test_mnist.py IDX-загрузчик, выборки, train/evaluate и согласованность backend
 evaluate_binary.ur Точность бинарной классификации
 math_overflow.ur Обработка переполнения в math.exp
 match_struct.ur Деструктуризация структур в match

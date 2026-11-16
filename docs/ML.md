@@ -11,13 +11,14 @@ ML-модуль U-Ray
 5. nn: слои и forward
 6. nn: backprop-примитивы
 7. nn: high-level API
-8. nn: оптимизаторы
-9. nn: сохранение моделей
-10. Контракт skip_last_act
-11. Состояние оптимизатора и save/load
-12. Численная устойчивость
-13. Формат JSON
-14. Рецепты
+8. nn: загрузка MNIST
+9. nn: оптимизаторы
+10. nn: сохранение моделей
+11. Контракт skip_last_act
+12. Состояние оптимизатора и save/load
+13. Численная устойчивость
+14. Формат JSON
+15. Рецепты
 
 ---
 
@@ -223,6 +224,59 @@ history = nn.train(model, X, Y, 100, 0.01, 32, "bce", "adam", true)
 ```
 
 `nn.evaluate(model, X, Y, loss)` возвращает `[средний_loss, accuracy]`.
+
+---
+
+nn: загрузка MNIST
+
+`nn.load_mnist(directory)` читает стандартные IDX-файлы MNIST — сжатые `.gz`
+или уже распакованные:
+
+```
+train-images-idx3-ubyte.gz
+train-labels-idx1-ubyte.gz
+t10k-images-idx3-ubyte.gz
+t10k-labels-idx1-ubyte.gz
+```
+
+Результат — словарь `{"train": split, "test": split}`. В каждом `split` доступны
+`"X"` (изображения), `"Y"` (метки one-hot), `"count"`, `"rows"` и `"columns"`.
+Изображения хранятся компактно и нормализуются в диапазон `[0, 1]` по мере
+обработки мини-батчей, а не копируются целиком в Python-списки.
+
+```
+import nn
+
+data = nn.load_mnist("data/mnist")
+train = data["train"]
+test = data["test"]
+
+model = nn.mlp([784, 64, 10], "relu", "softmax")
+history = nn.train(
+    model, train["X"], train["Y"],
+    5, 0.001, 128, "cce", "adam", true
+)
+metrics = nn.evaluate(model, test["X"], test["Y"], "cce")
+image = nn.sample(test["X"], 0)
+scores = nn.predict(model, [image])
+```
+
+`nn.sample(view, index)` возвращает одно нормализованное изображение или
+вектор-метку. `nn.predict(model, X[, limit])` возвращает вероятности классов;
+необязательный `limit` ограничивает число предсказаний.
+
+Для полного набора используй NumPy-бэкенд: он считает прямой и обратный проход
+целыми мини-батчами. Установи необязательную зависимость и запусти пример:
+
+```
+python3 -m pip install numpy
+python3 examples/download_mnist.py
+./uray examples/mnist.ur --backend=numpy
+```
+
+Без NumPy маленькие наборы работают на стандартном Python backend. Для полного
+MNIST обучение, оценка и предсказание намеренно требуют `--backend=numpy`, чтобы
+не начинать многочасовые циклы по одному изображению.
 
 ---
 

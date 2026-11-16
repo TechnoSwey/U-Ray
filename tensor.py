@@ -8,6 +8,11 @@ _backend = "python"
 _numpy = None
 
 
+def get_numpy():
+    """Return the configured NumPy module, or None for the Python backend."""
+    return _numpy
+
+
 def set_backend(name):
     """Select the implementation used for tensor math operations."""
     global _backend, _numpy

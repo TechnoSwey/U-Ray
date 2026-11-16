@@ -131,8 +131,9 @@ def _build_argument_parser():
         prog="uray",
         description="Интерпретатор языка программирования U-Ray.",
         epilog=(
-            "Без файла запускается интерактивный режим. NumPy нужен только для "
-            "--backend=numpy. Команды: uray fmt FILE, uray check FILE."
+            "Без файла запускается интерактивный режим. NumPy ускоряет "
+            "тензорные и пакетные ML-операции при --backend=numpy. "
+            "Команды: uray fmt FILE, uray check FILE."
         ),
     )
     parser.add_argument(
@@ -154,7 +155,7 @@ def _build_argument_parser():
         "--backend",
         choices=("python", "numpy"),
         default="python",
-        help="backend тензорных операций (по умолчанию: python)",
+        help="backend тензорных и пакетных ML-операций (по умолчанию: python)",
     )
     return parser
 

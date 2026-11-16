@@ -8,7 +8,8 @@ import random as _pyrandom
 import values
 from errors import RuntimeErrorUray as R
 from values import DictValue, Builtin, Module, Function
-from tensor import Tensor
+from tensor import Tensor, get_numpy
+from mnist import MNISTView, load_mnist_directory
 
 
 class ModuleRegistry:
@@ -970,12 +971,423 @@ class ModuleRegistry:
             if loss_name == "cce": return cce_grad([yhat, y])
             raise R(f"nn.train: неизвестная функция потерь {loss_name!r}")
 
+        def load_mnist(args):
+            if len(args) != 1 or not isinstance(args[0], str):
+                raise R("nn.load_mnist ожидает путь к каталогу MNIST")
+            try:
+                splits = load_mnist_directory(_resolve_path(args[0]))
+            except (OSError, ValueError) as error:
+                raise R(f"nn.load_mnist: {error}")
+
+            result = DictValue()
+            for name, storage in splits.items():
+                split = DictValue()
+                split["X"] = MNISTView(storage, "images")
+                split["Y"] = MNISTView(storage, "labels")
+                split["count"] = storage.count
+                split["rows"] = storage.rows
+                split["columns"] = storage.columns
+                result[name] = split
+            return result
+
+        def _dataset_length(data, operation):
+            if isinstance(data, (list, MNISTView)):
+                return len(data)
+            raise R(f"{operation} ожидает список или набор MNIST")
+
+        def _dataset_sample(data, index, operation):
+            if isinstance(data, MNISTView):
+                try:
+                    return data.sample(index)
+                except (IndexError, TypeError, ValueError) as error:
+                    raise R(f"{operation}: {error}")
+            return data[index]
+
+        def _validate_dataset_pair(X, Y, operation):
+            if isinstance(X, MNISTView) or isinstance(Y, MNISTView):
+                if not isinstance(X, MNISTView) or not isinstance(Y, MNISTView):
+                    raise R(f"{operation}: X и Y должны быть одним типом данных")
+                if X.kind != "images" or Y.kind != "labels":
+                    raise R(f"{operation}: MNIST ожидает X=изображения, Y=метки")
+                if X.storage is not Y.storage:
+                    raise R(f"{operation}: X и Y должны относиться к одному split")
+            x_count = _dataset_length(X, operation)
+            y_count = _dataset_length(Y, operation)
+            if x_count != y_count:
+                raise R(f"{operation}: X и Y разной длины")
+            if x_count == 0:
+                raise R(f"{operation}: набор данных не должен быть пустым")
+            return x_count
+
+        def _validate_mnist_model(model, X, Y, operation):
+            if not isinstance(model, DictValue) or "layers" not in model:
+                raise R(f"{operation} ожидает модель")
+            if not model["layers"]:
+                raise R(f"{operation}: модель должна содержать слои")
+            if isinstance(X, MNISTView):
+                first_W, _ = layer_data(operation, model["layers"][0])
+                expected = X.storage.rows * X.storage.columns
+                if len(first_W[0]) != expected:
+                    raise R(
+                        f"{operation}: модель ожидает {len(first_W[0])} входов, "
+                        f"MNIST даёт {expected}"
+                    )
+            if isinstance(Y, MNISTView):
+                last_W, _ = layer_data(operation, model["layers"][-1])
+                if len(last_W) != 10:
+                    raise R(
+                        f"{operation}: выходной слой должен содержать 10 "
+                        f"классов, получено {len(last_W)}"
+                    )
+
+        def _numpy_batch(data, indices, numpy, operation):
+            try:
+                if isinstance(data, MNISTView):
+                    batch = data.batch(indices, numpy)
+                else:
+                    batch = numpy.asarray(
+                        [data[index] for index in indices], dtype=numpy.float64
+                    )
+            except (TypeError, ValueError, IndexError) as error:
+                raise R(f"{operation}: некорректный пакет данных: {error}")
+            if batch.ndim != 2:
+                raise R(f"{operation}: пакет должен быть двумерной матрицей")
+            if not numpy.all(numpy.isfinite(batch)):
+                raise R(f"{operation}: данные содержат NaN или бесконечность")
+            return batch.astype(numpy.float64, copy=False)
+
+        def _numpy_parameters(model, numpy, operation):
+            weights = []
+            biases = []
+            for layer in model["layers"]:
+                W, b = layer_data(operation, layer)
+                weights.append(numpy.asarray(W, dtype=numpy.float64))
+                biases.append(numpy.asarray(b, dtype=numpy.float64))
+            return weights, biases
+
+        def _numpy_forward(model, x, weights, biases, numpy):
+            activations = [x]
+            pre_activations = []
+            current = x
+            last = len(weights) - 1
+            for index in range(len(weights)):
+                z = current @ weights[index].T + biases[index]
+                pre_activations.append(z)
+                if index == last:
+                    out_act = model["out_act"]
+                    if out_act == "softmax":
+                        shifted = z - numpy.max(z, axis=1, keepdims=True)
+                        exp_z = numpy.exp(shifted)
+                        current = exp_z / numpy.sum(
+                            exp_z, axis=1, keepdims=True
+                        )
+                    elif out_act == "sigmoid":
+                        current = 1.0 / (
+                            1.0 + numpy.exp(-numpy.clip(z, -709.0, 709.0))
+                        )
+                    else:
+                        current = z
+                else:
+                    act = model["act"]
+                    if act == "relu":
+                        current = numpy.maximum(z, 0.0)
+                    elif act == "leaky_relu":
+                        current = numpy.where(z > 0.0, z, 0.1 * z)
+                    else:
+                        current = 1.0 / (
+                            1.0 + numpy.exp(-numpy.clip(z, -709.0, 709.0))
+                        )
+                activations.append(current)
+            return activations, pre_activations
+
+        def _numpy_predict(model, X, numpy, batch_size=512):
+            count = _dataset_length(X, "nn.predict")
+            weights, biases = _numpy_parameters(model, numpy, "nn.predict")
+            result = []
+            for start in range(0, count, batch_size):
+                indices = list(range(start, min(start + batch_size, count)))
+                xb = _numpy_batch(X, indices, numpy, "nn.predict")
+                if xb.shape[1] != weights[0].shape[1]:
+                    raise R(
+                        f"nn.predict: модель ожидает {weights[0].shape[1]} "
+                        f"входов, получено {xb.shape[1]}"
+                    )
+                activations, _ = _numpy_forward(
+                    model, xb, weights, biases, numpy
+                )
+                result.extend(activations[-1].tolist())
+            return result
+
+        def sample(args):
+            if len(args) != 2:
+                raise R("nn.sample ожидает набор MNIST и индекс")
+            data, index = args
+            if not isinstance(data, MNISTView):
+                raise R("nn.sample ожидает набор из nn.load_mnist")
+            try:
+                return data.sample(index)
+            except (IndexError, TypeError, ValueError) as error:
+                raise R(f"nn.sample: {error}")
+
+        def _numpy_loss_rows(loss_name, predictions, targets, numpy):
+            eps = 1e-12
+            clipped = numpy.clip(predictions, eps, 1.0 - eps)
+            if loss_name == "cce":
+                return -numpy.mean(
+                    targets * numpy.log(numpy.clip(predictions, eps, 1.0)),
+                    axis=1,
+                )
+            if loss_name == "bce":
+                return -numpy.mean(
+                    targets * numpy.log(clipped)
+                    + (1.0 - targets) * numpy.log(1.0 - clipped),
+                    axis=1,
+                )
+            return numpy.mean((predictions - targets) ** 2, axis=1)
+
+        def _numpy_evaluate(model, X, Y, loss_name, numpy, batch_size=512):
+            count = _validate_dataset_pair(X, Y, "nn.evaluate")
+            _validate_mnist_model(model, X, Y, "nn.evaluate")
+            weights, biases = _numpy_parameters(model, numpy, "nn.evaluate")
+            total_loss = 0.0
+            correct = 0
+            for start in range(0, count, batch_size):
+                indices = list(range(start, min(start + batch_size, count)))
+                xb = _numpy_batch(X, indices, numpy, "nn.evaluate")
+                yb = _numpy_batch(Y, indices, numpy, "nn.evaluate")
+                if xb.shape[1] != weights[0].shape[1]:
+                    raise R("nn.evaluate: ширина X не совпадает с входом модели")
+                if yb.shape[1] != weights[-1].shape[0]:
+                    raise R("nn.evaluate: ширина Y не совпадает с выходом модели")
+                activations, _ = _numpy_forward(
+                    model, xb, weights, biases, numpy
+                )
+                predictions = activations[-1]
+                total_loss += float(numpy.sum(
+                    _numpy_loss_rows(loss_name, predictions, yb, numpy)
+                ))
+                if predictions.shape[1] == 1:
+                    predicted = predictions[:, 0] >= 0.5
+                    actual = yb[:, 0] >= 0.5
+                else:
+                    predicted = numpy.argmax(predictions, axis=1)
+                    actual = numpy.argmax(yb, axis=1)
+                correct += int(numpy.sum(predicted == actual))
+            return [total_loss / count, correct / count]
+
+        def _numpy_train(
+            model, X, Y, epochs, lr, batch_size, loss_name, opt_name,
+            show_progress, numpy, count
+        ):
+            weights, biases = _numpy_parameters(model, numpy, "nn.train")
+            if not weights:
+                raise R("nn.train: модель должна содержать слои")
+            if loss_name == "cce" and model["out_act"] != "softmax":
+                raise R("nn.train: cce требует out_act=\"softmax\"")
+            if loss_name == "bce" and model["out_act"] != "sigmoid":
+                raise R("nn.train: bce требует out_act=\"sigmoid\"")
+
+            if opt_name == "adam":
+                first_w = [numpy.zeros_like(value) for value in weights]
+                second_w = [numpy.zeros_like(value) for value in weights]
+                first_b = [numpy.zeros_like(value) for value in biases]
+                second_b = [numpy.zeros_like(value) for value in biases]
+                step = 0
+            elif opt_name == "momentum":
+                velocity_w = [numpy.zeros_like(value) for value in weights]
+                velocity_b = [numpy.zeros_like(value) for value in biases]
+
+            indices = list(range(count))
+            history = []
+            for epoch in range(epochs):
+                _pyrandom.shuffle(indices)
+                epoch_loss = 0.0
+                for start in range(0, count, batch_size):
+                    batch_indices = indices[start:start + batch_size]
+                    xb = _numpy_batch(X, batch_indices, numpy, "nn.train")
+                    yb = _numpy_batch(Y, batch_indices, numpy, "nn.train")
+                    if xb.shape[1] != weights[0].shape[1]:
+                        raise R(
+                            f"nn.train: модель ожидает {weights[0].shape[1]} "
+                            f"входов, получено {xb.shape[1]}"
+                        )
+                    if yb.shape[1] != weights[-1].shape[0]:
+                        raise R(
+                            f"nn.train: модель ожидает {weights[-1].shape[0]} "
+                            f"выходов, получено {yb.shape[1]}"
+                        )
+
+                    activations, pre_activations = _numpy_forward(
+                        model, xb, weights, biases, numpy
+                    )
+                    predictions = activations[-1]
+                    row_losses = _numpy_loss_rows(
+                        loss_name, predictions, yb, numpy
+                    )
+                    epoch_loss += float(numpy.sum(row_losses))
+                    sample_count = len(batch_indices)
+                    output_width = predictions.shape[1]
+
+                    if loss_name == "cce":
+                        grad = (predictions - yb) / (
+                            sample_count * output_width
+                        )
+                    elif loss_name == "bce":
+                        grad = (predictions - yb) / (
+                            sample_count * output_width
+                        )
+                    else:
+                        grad_a = 2.0 * (predictions - yb) / (
+                            sample_count * output_width
+                        )
+                        out_act = model["out_act"]
+                        if out_act == "sigmoid":
+                            grad = grad_a * predictions * (1.0 - predictions)
+                        elif out_act == "softmax":
+                            projection = numpy.sum(
+                                grad_a * predictions, axis=1, keepdims=True
+                            )
+                            grad = predictions * (grad_a - projection)
+                        else:
+                            grad = grad_a
+
+                    grad_weights = [None] * len(weights)
+                    grad_biases = [None] * len(biases)
+                    for layer_index in range(len(weights) - 1, -1, -1):
+                        grad_weights[layer_index] = (
+                            grad.T @ activations[layer_index]
+                        )
+                        grad_biases[layer_index] = numpy.sum(grad, axis=0)
+                        if layer_index == 0:
+                            continue
+
+                        grad_a = grad @ weights[layer_index]
+                        z = pre_activations[layer_index - 1]
+                        if model["act"] == "relu":
+                            grad = grad_a * (z > 0.0)
+                        elif model["act"] == "leaky_relu":
+                            grad = grad_a * numpy.where(z > 0.0, 1.0, 0.1)
+                        else:
+                            hidden = activations[layer_index]
+                            grad = grad_a * hidden * (1.0 - hidden)
+
+                    if opt_name == "adam":
+                        step += 1
+                        beta1 = 0.9
+                        beta2 = 0.999
+                        for layer_index in range(len(weights)):
+                            first_w[layer_index] = (
+                                beta1 * first_w[layer_index]
+                                + (1.0 - beta1) * grad_weights[layer_index]
+                            )
+                            second_w[layer_index] = (
+                                beta2 * second_w[layer_index]
+                                + (1.0 - beta2)
+                                * grad_weights[layer_index] ** 2
+                            )
+                            first_b[layer_index] = (
+                                beta1 * first_b[layer_index]
+                                + (1.0 - beta1) * grad_biases[layer_index]
+                            )
+                            second_b[layer_index] = (
+                                beta2 * second_b[layer_index]
+                                + (1.0 - beta2)
+                                * grad_biases[layer_index] ** 2
+                            )
+                            corrected_w = first_w[layer_index] / (
+                                1.0 - beta1 ** step
+                            )
+                            corrected_vw = second_w[layer_index] / (
+                                1.0 - beta2 ** step
+                            )
+                            corrected_b = first_b[layer_index] / (
+                                1.0 - beta1 ** step
+                            )
+                            corrected_vb = second_b[layer_index] / (
+                                1.0 - beta2 ** step
+                            )
+                            weights[layer_index] -= lr * corrected_w / (
+                                numpy.sqrt(corrected_vw) + 1e-8
+                            )
+                            biases[layer_index] -= lr * corrected_b / (
+                                numpy.sqrt(corrected_vb) + 1e-8
+                            )
+                    elif opt_name == "momentum":
+                        for layer_index in range(len(weights)):
+                            velocity_w[layer_index] = (
+                                0.9 * velocity_w[layer_index]
+                                - lr * grad_weights[layer_index]
+                            )
+                            velocity_b[layer_index] = (
+                                0.9 * velocity_b[layer_index]
+                                - lr * grad_biases[layer_index]
+                            )
+                            weights[layer_index] += velocity_w[layer_index]
+                            biases[layer_index] += velocity_b[layer_index]
+                    else:
+                        for layer_index in range(len(weights)):
+                            weights[layer_index] -= lr * grad_weights[layer_index]
+                            biases[layer_index] -= lr * grad_biases[layer_index]
+
+                mean_loss = epoch_loss / count
+                history.append(mean_loss)
+                if show_progress:
+                    width = 20
+                    current = epoch + 1
+                    filled = int(width * current / epochs)
+                    bar = "█" * filled + "░" * (width - filled)
+                    pct = int(100 * current / epochs)
+                    print(
+                        f"\r[{bar}] {pct}% loss: {mean_loss:.6g}",
+                        end="",
+                        flush=True,
+                    )
+                    if current == epochs:
+                        print()
+
+            for index, layer in enumerate(model["layers"]):
+                layer["W"] = Tensor(weights[index].tolist())
+                layer["b"] = Tensor(biases[index].tolist())
+            return history
+
         def predict(args):
-            if len(args) != 2: raise R("nn.predict ожидает model и X")
-            model, X = args
-            if not isinstance(X, list): raise R("nn.predict ожидает список точек")
+            if len(args) not in (2, 3):
+                raise R("nn.predict ожидает model, X и необязательный limit")
+            model, X = args[0], args[1]
+            count = _dataset_length(X, "nn.predict")
+            limit = args[2] if len(args) == 3 else count
+            if not isinstance(limit, int) or isinstance(limit, bool) or limit < 0:
+                raise R("nn.predict: limit должен быть неотрицательным целым")
+            count = min(count, limit)
+            if isinstance(X, MNISTView) and X.kind != "images":
+                raise R("nn.predict: ожидаются изображения, а не метки")
+            if count == 0:
+                return []
+            _validate_mnist_model(model, X, None, "nn.predict")
+            numpy = get_numpy()
+            if numpy is None and isinstance(X, MNISTView) and count >= 10000:
+                raise R(
+                    "nn.predict: полный MNIST требует NumPy; "
+                    "запустите uray с --backend=numpy"
+                )
+            if numpy is not None:
+                if count == _dataset_length(X, "nn.predict"):
+                    return _numpy_predict(model, X, numpy)
+                weights, biases = _numpy_parameters(model, numpy, "nn.predict")
+                indices = list(range(count))
+                xb = _numpy_batch(X, indices, numpy, "nn.predict")
+                if xb.shape[1] != weights[0].shape[1]:
+                    raise R(
+                        f"nn.predict: модель ожидает {weights[0].shape[1]} "
+                        f"входов, получено {xb.shape[1]}"
+                    )
+                activations, _ = _numpy_forward(
+                    model, xb, weights, biases, numpy
+                )
+                return activations[-1].tolist()
             res = []
-            for x in X:
+            for index in range(count):
+                x = _dataset_sample(X, index, "nn.predict")
                 cache = forward_mlp([model, x])
                 res.append(cache[-1])
             return res
@@ -983,16 +1395,24 @@ class ModuleRegistry:
         def evaluate(args):
             if len(args) != 4: raise R("nn.evaluate ожидает model, X, Y, loss")
             model, X, Y, loss_name = args
-            if not isinstance(X, list) or not isinstance(Y, list): raise R("nn.evaluate ожидает списки")
-            if len(X) != len(Y): raise R("nn.evaluate: X и Y разной длины")
-            if not X: raise R("nn.evaluate: набор данных не должен быть пустым")
+            count = _validate_dataset_pair(X, Y, "nn.evaluate")
             if loss_name not in ("bce", "mse", "cce"):
                 raise R(f"nn.evaluate: неизвестная функция потерь {loss_name!r}")
+            _validate_mnist_model(model, X, Y, "nn.evaluate")
+            numpy = get_numpy()
+            if numpy is None and isinstance(X, MNISTView) and count >= 10000:
+                raise R(
+                    "nn.evaluate: полный MNIST требует NumPy; "
+                    "запустите uray с --backend=numpy"
+                )
+            if numpy is not None:
+                return _numpy_evaluate(model, X, Y, loss_name, numpy)
             total_loss = 0.0
             correct = 0
-            for i in range(len(X)):
-                yhat = forward_mlp([model, X[i]])[-1]
-                y = Y[i]
+            for i in range(count):
+                x = _dataset_sample(X, i, "nn.evaluate")
+                y = _dataset_sample(Y, i, "nn.evaluate")
+                yhat = forward_mlp([model, x])[-1]
                 total_loss += _compute_loss(loss_name, yhat, y)
                 if len(yhat) == 1:
                     pred = 1.0 if yhat[0] >= 0.5 else 0.0
@@ -1017,10 +1437,10 @@ class ModuleRegistry:
             loss_name = args[6] if len(args) > 6 else "bce"
             opt_name = args[7] if len(args) > 7 else "adam"
             show_progress = args[8] if len(args) > 8 else False
-            if not isinstance(X, list) or not isinstance(Y, list):
-                raise R("nn.train ожидает списки X и Y")
-            if len(X) != len(Y): raise R("nn.train: X и Y разной длины")
-            if not X: raise R("nn.train: набор данных не должен быть пустым")
+            if not isinstance(X, (list, MNISTView)) \
+                    or not isinstance(Y, (list, MNISTView)):
+                raise R("nn.train ожидает списки X и Y или набор MNIST")
+            count = _validate_dataset_pair(X, Y, "nn.train")
             if not isinstance(epochs, int) or isinstance(epochs, bool) or epochs <= 0: raise R("nn.train: epochs > 0")
             if not isinstance(batch_size, int) or isinstance(batch_size, bool) or batch_size <= 0: raise R("nn.train: batch_size > 0")
             if not isinstance(show_progress, bool):
@@ -1034,12 +1454,25 @@ class ModuleRegistry:
             if loss_name == "cce" and model["out_act"] != "softmax":
                 raise R("nn.train: cce требует out_act=\"softmax\"")
             ensure_number("train", lr)
+            _validate_mnist_model(model, X, Y, "nn.train")
+            if opt_name not in ("sgd", "momentum", "adam"):
+                raise R(f"nn.train: неизвестный оптимизатор {opt_name!r}")
+            numpy = get_numpy()
+            if numpy is None and isinstance(X, MNISTView) and count >= 10000:
+                raise R(
+                    "nn.train: полный MNIST требует NumPy; "
+                    "запустите uray с --backend=numpy"
+                )
+            if numpy is not None:
+                return _numpy_train(
+                    model, X, Y, epochs, lr, batch_size, loss_name,
+                    opt_name, show_progress, numpy, count
+                )
             state = None
             if opt_name == "adam": state = adam_init([model])
             elif opt_name == "momentum": state = momentum_init([model])
-            elif opt_name != "sgd": raise R(f"nn.train: неизвестный оптимизатор {opt_name!r}")
             history = []
-            n = len(X)
+            n = count
             indices = list(range(n))
             for epoch in range(epochs):
                 _pyrandom.shuffle(indices)
@@ -1050,9 +1483,10 @@ class ModuleRegistry:
                     accum_grads = None
                     batch_loss = 0.0
                     for idx in batch_indices:
-                        cache = forward_mlp([model, X[idx]])
+                        x = _dataset_sample(X, idx, "nn.train")
+                        y = _dataset_sample(Y, idx, "nn.train")
+                        cache = forward_mlp([model, x])
                         yhat = cache[-1]
-                        y = Y[idx]
                         batch_loss += _compute_loss(loss_name, yhat, y)
                         grad_out = _compute_grad(loss_name, yhat, y)
                         # BCE+sigmoid and CCE+softmax have a fused dL/dz.
@@ -1132,8 +1566,10 @@ class ModuleRegistry:
             "summary": Builtin("summary", summary),
             "save": Builtin("save", save),
             "load": Builtin("load", load),
+            "load_mnist": Builtin("load_mnist", load_mnist),
             "export_pytorch": Builtin("export_pytorch", export_pytorch),
             "predict": Builtin("predict", predict),
+            "sample": Builtin("sample", sample),
             "evaluate": Builtin("evaluate", evaluate),
             "train": Builtin("train", train),
         })
