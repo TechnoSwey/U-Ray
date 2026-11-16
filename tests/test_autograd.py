@@ -190,6 +190,137 @@ class AutogradTests(unittest.TestCase):
         self.assertEqual(before, after)
         self.assertEqual(len(self.nn.members["parameters"].fn([loaded])), 4)
 
+    def test_batch_norm_gradients_and_running_statistics(self):
+        values = [[0.2, 1.0], [1.4, -0.5], [2.2, 3.0]]
+        probe = [[0.3, -0.2], [1.1, 0.7], [-0.4, 0.8]]
+
+        def objective(data, gamma):
+            layer = self.nn.members["batch_norm_layer"].fn([2, 0.2, 1e-5])
+            layer["gamma"]._data = gamma
+            output = GradTensor(data).batch_norm(
+                layer["gamma"], layer["beta"], layer["running_mean"],
+                layer["running_var"], True, layer["momentum"],
+                layer["epsilon"], layer["axis"],
+            )
+            return output.mul(probe).sum_all().item()
+
+        layer = self.nn.members["batch_norm_layer"].fn([2, 0.2, 1e-5])
+        x = GradTensor(values, requires_grad=True)
+        output = x.batch_norm(
+            layer["gamma"], layer["beta"], layer["running_mean"],
+            layer["running_var"], True, layer["momentum"],
+            layer["epsilon"], layer["axis"],
+        )
+        output.mul(probe).sum_all().backward()
+        self.assertAlmostEqual(
+            x.grad[1][0],
+            _finite_difference(
+                lambda data: objective(data, [1.0, 1.0]), values, [1, 0]
+            ),
+            places=5,
+        )
+        gamma = [1.0, 1.0]
+        numeric_gamma = _finite_difference(
+            lambda value: objective(values, value), gamma, [1]
+        )
+        self.assertAlmostEqual(layer["gamma"].grad[1], numeric_gamma, places=5)
+        self.assertAlmostEqual(layer["running_mean"][0], 0.2 * (3.8 / 3.0))
+        self.assertAlmostEqual(layer["running_mean"][1], 0.2 * (3.5 / 3.0))
+        self.assertNotEqual(layer["running_var"], [1.0, 1.0])
+        self.assertEqual(layer["beta"].grad, [
+            sum(row[0] for row in probe),
+            sum(row[1] for row in probe),
+        ])
+
+    def test_batch_norm_numpy_matches_python_for_channel_axis(self):
+        try:
+            import numpy  # noqa: F401
+        except ImportError:
+            self.skipTest("NumPy is optional")
+        data = [
+            [[[1.0, 2.0]], [[3.0, 4.0]]],
+            [[[5.0, 6.0]], [[7.0, 8.0]]],
+        ]
+        results = []
+        for backend in ("python", "numpy"):
+            set_backend(backend)
+            layer = self.nn.members["batch_norm_layer"].fn([2])
+            x = GradTensor(data, requires_grad=True)
+            output = x.batch_norm(
+                layer["gamma"], layer["beta"], layer["running_mean"],
+                layer["running_var"], True, layer["momentum"],
+                layer["epsilon"], 1,
+            )
+            output.mean().backward()
+            results.append((output.data, x.grad, layer["gamma"].grad))
+        for left, right in zip(
+            _flatten_nested(results[0]), _flatten_nested(results[1])
+        ):
+            self.assertAlmostEqual(left, right, places=12)
+
+    def test_dropout_and_residual_layer_modes_and_serialization(self):
+        self.nn.members["rand_seed"].fn([31])
+        model = self.nn.members["sequential"].fn([[
+            self.nn.members["batch_norm_layer"].fn([2]),
+            self.nn.members["dropout_layer"].fn([0.5]),
+            self.nn.members["residual_layer"].fn([[
+                self.nn.members["linear_layer"].fn([2, 2]),
+                self.nn.members["activation_layer"].fn(["tanh"]),
+                self.nn.members["linear_layer"].fn([2, 2]),
+            ]]),
+            self.nn.members["linear_layer"].fn([2, 2]),
+        ]])
+        x = GradTensor([[1.0, 0.0], [0.0, 1.0]])
+        before_stats = list(model["layers"][0]["running_mean"])
+        training_output = self.nn.members["forward_layers"].fn([model, x, True])
+        self.assertEqual(training_output.shape(), [2, 2])
+        self.assertNotEqual(model["layers"][0]["running_mean"], before_stats)
+        self.nn.members["rand_seed"].fn([31])
+        dropout_model = self.nn.members["sequential"].fn([[
+            self.nn.members["dropout_layer"].fn([0.5])
+        ]])
+        dropped = self.nn.members["forward_layers"].fn([
+            dropout_model, x, True,
+        ])
+        flat_dropped = _flatten_nested(dropped.data)
+        self.assertIn(0.0, flat_dropped)
+        self.assertIn(2.0, flat_dropped)
+
+        output_before = self.nn.members["forward_layers"].fn([model, x]).data
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / "regularized.json")
+            self.nn.members["save_layers"].fn([model, path])
+            loaded = self.nn.members["load_layers"].fn([path])
+        output_after = self.nn.members["forward_layers"].fn([loaded, x]).data
+        self.assertEqual(output_after, output_before)
+        self.assertEqual(len(self.nn.members["parameters"].fn([model])), 8)
+
+    def test_training_updates_batch_norm_and_uses_regularization(self):
+        self.nn.members["rand_seed"].fn([17])
+        model = self.nn.members["sequential"].fn([[
+            self.nn.members["batch_norm_layer"].fn([2]),
+            self.nn.members["dropout_layer"].fn([0.1]),
+            self.nn.members["residual_layer"].fn([[
+                self.nn.members["linear_layer"].fn([2, 2]),
+                self.nn.members["activation_layer"].fn(["relu"]),
+                self.nn.members["linear_layer"].fn([2, 2]),
+            ]]),
+        ]])
+        x = [[1.0, 0.0], [0.0, 1.0], [1.0, 1.0], [-1.0, -1.0]]
+        y = [[1.0, 0.0], [0.0, 1.0], [1.0, 0.0], [0.0, 1.0]]
+        history = self.nn.members["train_layers"].fn([
+            model, x, y, 2, 0.01, 2, "cce", "adam", False,
+        ])
+        self.assertEqual(len(history), 2)
+        self.assertTrue(all(math.isfinite(value) for value in history))
+        self.assertNotEqual(model["layers"][0]["running_mean"], [0.0, 0.0])
+        running_mean = list(model["layers"][0]["running_mean"])
+        metrics = self.nn.members["evaluate_layers"].fn([
+            model, x, y, "cce",
+        ])
+        self.assertEqual(len(metrics), 2)
+        self.assertEqual(model["layers"][0]["running_mean"], running_mean)
+
     def test_numpy_conv2d_matches_python_when_available(self):
         try:
             import numpy  # noqa: F401

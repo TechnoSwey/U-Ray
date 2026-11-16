@@ -386,6 +386,58 @@ class ModuleRegistry:
             layer["padding"] = padding
             return layer
 
+        def batch_norm_layer(args):
+            if len(args) < 1 or len(args) > 4:
+                raise R(
+                    "nn.batch_norm_layer ожидает features, momentum?, epsilon?, axis?"
+                )
+            features = args[0]
+            _positive_int("batch_norm_layer", features)
+            momentum = args[1] if len(args) >= 2 else 0.1
+            epsilon = args[2] if len(args) >= 3 else 1e-5
+            axis = args[3] if len(args) >= 4 else -1
+            ensure_number("batch_norm_layer", momentum)
+            ensure_number("batch_norm_layer", epsilon)
+            if not 0.0 <= momentum <= 1.0:
+                raise R("nn.batch_norm_layer: momentum должен быть в диапазоне [0, 1]")
+            if epsilon <= 0.0:
+                raise R("nn.batch_norm_layer: epsilon должен быть > 0")
+            if not isinstance(axis, int) or isinstance(axis, bool):
+                raise R("nn.batch_norm_layer: axis должен быть целым")
+            layer = DictValue()
+            layer["kind"] = "batch_norm"
+            layer["gamma"] = as_grad_tensor([1.0] * features, requires_grad=True)
+            layer["beta"] = as_grad_tensor([0.0] * features, requires_grad=True)
+            layer["running_mean"] = [0.0] * features
+            layer["running_var"] = [1.0] * features
+            layer["momentum"] = float(momentum)
+            layer["epsilon"] = float(epsilon)
+            layer["axis"] = axis
+            return layer
+
+        def dropout_layer(args):
+            if len(args) != 1:
+                raise R("nn.dropout_layer ожидает rate")
+            rate = args[0]
+            ensure_number("dropout_layer", rate)
+            if rate < 0.0 or rate >= 1.0:
+                raise R("nn.dropout_layer: rate должен быть в диапазоне [0, 1)")
+            layer = DictValue()
+            layer["kind"] = "dropout"
+            layer["rate"] = float(rate)
+            return layer
+
+        def residual_layer(args):
+            if len(args) != 1 or not isinstance(args[0], list) or not args[0]:
+                raise R("nn.residual_layer ожидает непустой список слоёв")
+            for layer in args[0]:
+                if not isinstance(layer, DictValue) or "kind" not in layer:
+                    raise R("nn.residual_layer: каждый элемент должен быть слоем")
+            layer = DictValue()
+            layer["kind"] = "residual"
+            layer["layers"] = args[0]
+            return layer
+
         def activation_layer(args):
             if len(args) != 1 or args[0] not in ("relu", "sigmoid", "tanh", "softmax"):
                 raise R("nn.activation_layer ожидает relu, sigmoid, tanh или softmax")
@@ -422,14 +474,7 @@ class ModuleRegistry:
             model["layers"] = args[0]
             return model
 
-        def forward_layers(args):
-            if len(args) != 2:
-                raise R("nn.forward_layers ожидает модель и вход")
-            model, source = args
-            layers = model["layers"] if isinstance(model, DictValue) else model
-            if not isinstance(layers, list):
-                raise R("nn.forward_layers ожидает список слоёв или sequential-модель")
-            output = _grad_operand("forward_layers", source)
+        def _forward_layer_list(layers, output, training):
             for layer in layers:
                 if not isinstance(layer, DictValue) or "kind" not in layer:
                     raise R("nn.forward_layers: каждый элемент должен быть слоем")
@@ -459,9 +504,53 @@ class ModuleRegistry:
                     output = output.max_pool2d(layer["kernel"], layer["stride"])
                 elif kind == "flatten":
                     output = output.flatten()
+                elif kind == "batch_norm":
+                    output = output.batch_norm(
+                        layer["gamma"],
+                        layer["beta"],
+                        layer["running_mean"],
+                        layer["running_var"],
+                        training,
+                        layer["momentum"],
+                        layer["epsilon"],
+                        layer["axis"],
+                    )
+                elif kind == "dropout":
+                    if training and layer["rate"] > 0.0:
+                        scale = 1.0 / (1.0 - layer["rate"])
+
+                        def make_mask(value):
+                            if isinstance(value, list):
+                                return [make_mask(item) for item in value]
+                            return (
+                                0.0
+                                if _pyrandom.random() < layer["rate"]
+                                else scale
+                            )
+
+                        output = output.mul(as_grad_tensor(make_mask(output.data)))
+                elif kind == "residual":
+                    branch = _forward_layer_list(
+                        layer["layers"], output, training
+                    )
+                    output = output.add(branch)
                 else:
                     raise R(f"nn.forward_layers: неизвестный тип слоя {kind!r}")
             return output
+
+        def forward_layers(args):
+            if len(args) not in (2, 3):
+                raise R("nn.forward_layers ожидает model, input и training?")
+            model, source = args[:2]
+            training = args[2] if len(args) == 3 else False
+            if not isinstance(training, bool):
+                raise R("nn.forward_layers: training должен быть bool")
+            layers = model["layers"] if isinstance(model, DictValue) else model
+            if not isinstance(layers, list):
+                raise R("nn.forward_layers ожидает список слоёв или sequential-модель")
+            return _forward_layer_list(
+                layers, _grad_operand("forward_layers", source), training
+            )
 
         def _autograd_batch(view, indices, name):
             if isinstance(view, MNISTView):
@@ -555,7 +644,7 @@ class ModuleRegistry:
                     y_batch = _autograd_batch(Y, indices, "train_layers")
                     x_value = _prepare_graph_input(x_batch, input_shape)
                     y_value = as_grad_tensor(y_batch)
-                    logits = forward_layers([model, x_value])
+                    logits = forward_layers([model, x_value, True])
                     loss_value = _autograd_loss(logits, y_value, loss_name)
                     loss_value.backward()
                     for param in params:
@@ -605,7 +694,7 @@ class ModuleRegistry:
                 x_batch = _autograd_batch(X, indices, "evaluate_layers")
                 y_batch = _autograd_batch(Y, indices, "evaluate_layers")
                 logits = forward_layers([
-                    model, _prepare_graph_input(x_batch, input_shape)
+                    model, _prepare_graph_input(x_batch, input_shape), False
                 ])
                 target = as_grad_tensor(y_batch)
                 total_loss += _autograd_loss(logits, target, loss_name).item() * len(indices)
@@ -640,7 +729,7 @@ class ModuleRegistry:
                 indices = list(range(start, min(start + 256, count)))
                 x_batch = _autograd_batch(X, indices, "predict_layers")
                 logits = forward_layers([
-                    model, _prepare_graph_input(x_batch, input_shape)
+                    model, _prepare_graph_input(x_batch, input_shape), False
                 ])
                 if len(logits.shape()) == 2 and logits.shape()[1] == 1:
                     probabilities = logits.sigmoid().data
@@ -1400,8 +1489,7 @@ class ModuleRegistry:
                 raise R("nn.save_layers ожидает модель nn.sequential")
             if not isinstance(path, str):
                 raise R("nn.save_layers: path должен быть строкой")
-            plain_layers = []
-            for layer in model["layers"]:
+            def serialize_layer(layer):
                 if not isinstance(layer, DictValue) or "kind" not in layer:
                     raise R("nn.save_layers: некорректный слой")
                 kind = layer["kind"]
@@ -1417,9 +1505,27 @@ class ModuleRegistry:
                 elif kind == "max_pool2d":
                     plain["kernel"] = layer["kernel"]
                     plain["stride"] = layer["stride"]
+                elif kind == "batch_norm":
+                    plain["gamma"] = layer["gamma"].to_list()
+                    plain["beta"] = layer["beta"].to_list()
+                    plain["running_mean"] = list(layer["running_mean"])
+                    plain["running_var"] = list(layer["running_var"])
+                    plain["momentum"] = layer["momentum"]
+                    plain["epsilon"] = layer["epsilon"]
+                    plain["axis"] = layer["axis"]
+                elif kind == "dropout":
+                    plain["rate"] = layer["rate"]
+                elif kind == "residual":
+                    plain["layers"] = [
+                        serialize_layer(child) for child in layer["layers"]
+                    ]
                 elif kind not in ("linear", "conv2d", "flatten"):
                     raise R(f"nn.save_layers: неизвестный тип слоя {kind!r}")
-                plain_layers.append(plain)
+                return plain
+
+            plain_layers = [
+                serialize_layer(layer) for layer in model["layers"]
+            ]
             data = {"format": "uray-sequential", "version": 1, "layers": plain_layers}
             full_path = _resolve_path(path)
             try:
@@ -1447,8 +1553,7 @@ class ModuleRegistry:
                 or not isinstance(data.get("layers"), list)
             ):
                 raise R("nn.load_layers: неподдерживаемый формат модели")
-            layers = []
-            for plain in data["layers"]:
+            def deserialize_layer(plain):
                 if not isinstance(plain, dict) or "kind" not in plain:
                     raise R("nn.load_layers: некорректный слой")
                 kind = plain["kind"]
@@ -1469,9 +1574,57 @@ class ModuleRegistry:
                 elif kind == "max_pool2d":
                     layer["kernel"] = plain.get("kernel")
                     layer["stride"] = plain.get("stride")
+                elif kind == "batch_norm":
+                    required = (
+                        "gamma", "beta", "running_mean", "running_var",
+                        "momentum", "epsilon", "axis",
+                    )
+                    if any(name not in plain for name in required):
+                        raise R("nn.load_layers: в batch_norm отсутствуют параметры")
+                    gamma, beta = plain["gamma"], plain["beta"]
+                    mean, variance = plain["running_mean"], plain["running_var"]
+                    if (
+                        not isinstance(gamma, list)
+                        or not gamma
+                        or not isinstance(beta, list)
+                        or len(beta) != len(gamma)
+                        or not isinstance(mean, list)
+                        or len(mean) != len(gamma)
+                        or not isinstance(variance, list)
+                        or len(variance) != len(gamma)
+                    ):
+                        raise R("nn.load_layers: некорректные параметры batch_norm")
+                    layer["gamma"] = as_grad_tensor(gamma, requires_grad=True)
+                    layer["beta"] = as_grad_tensor(beta, requires_grad=True)
+                    layer["running_mean"] = mean
+                    layer["running_var"] = variance
+                    layer["momentum"] = plain["momentum"]
+                    layer["epsilon"] = plain["epsilon"]
+                    layer["axis"] = plain["axis"]
+                elif kind == "dropout":
+                    rate = plain.get("rate")
+                    if (
+                        not isinstance(rate, (int, float))
+                        or isinstance(rate, bool)
+                        or rate < 0.0
+                        or rate >= 1.0
+                    ):
+                        raise R("nn.load_layers: некорректный rate в dropout")
+                    layer["rate"] = float(rate)
+                elif kind == "residual":
+                    children = plain.get("layers")
+                    if not isinstance(children, list) or not children:
+                        raise R("nn.load_layers: residual должен содержать слои")
+                    layer["layers"] = [
+                        deserialize_layer(child) for child in children
+                    ]
                 elif kind not in ("linear", "conv2d", "flatten"):
                     raise R(f"nn.load_layers: неизвестный тип слоя {kind!r}")
-                layers.append(layer)
+                return layer
+
+            layers = [
+                deserialize_layer(plain) for plain in data["layers"]
+            ]
             model = DictValue()
             model["kind"] = "sequential"
             model["layers"] = layers
@@ -2129,6 +2282,9 @@ class ModuleRegistry:
             "max_pool2d": Builtin("max_pool2d", grad_max_pool2d),
             "linear_layer": Builtin("linear_layer", linear_layer),
             "conv2d_layer": Builtin("conv2d_layer", conv2d_layer),
+            "batch_norm_layer": Builtin("batch_norm_layer", batch_norm_layer),
+            "dropout_layer": Builtin("dropout_layer", dropout_layer),
+            "residual_layer": Builtin("residual_layer", residual_layer),
             "activation_layer": Builtin("activation_layer", activation_layer),
             "max_pool2d_layer": Builtin("max_pool2d_layer", pool2d_layer),
             "flatten_layer": Builtin("flatten_layer", flatten_layer),

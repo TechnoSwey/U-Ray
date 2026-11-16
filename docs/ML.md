@@ -270,8 +270,37 @@ model = nn.sequential([
 ```
 
 Доступны `linear_layer`, `conv2d_layer`, `activation_layer`,
-`max_pool2d_layer` и `flatten_layer`. `nn.forward_layers(model, x)` запускает
-прямой проход. U-Ray-функции могут комбинировать операции, ветвить и повторно
+`max_pool2d_layer`, `flatten_layer`, `batch_norm_layer`, `dropout_layer` и
+`residual_layer`. `nn.forward_layers(model, x)` запускает режим оценки, а
+`nn.forward_layers(model, x, true)` — обучающий режим. `nn.train_layers`
+автоматически включает обучение; `evaluate_layers` и `predict_layers` используют
+режим оценки.
+
+`nn.batch_norm_layer(features[, momentum, epsilon, axis])` обучает параметры
+масштаба и сдвига и хранит скользящие статистики. По умолчанию нормализуется
+последняя ось признаков, например `[batch, features]`; для выхода свёртки
+`[batch, channels, height, width]` укажи `axis = 1`. При Dropout с аргументом
+`rate` случайные элементы обнуляются только во время обучения, а оставшиеся
+масштабируются на `1 / (1 - rate)`.
+
+`nn.residual_layer([...])` принимает непустую последовательность слоёв и
+прибавляет её результат к входу. Вход и ветвь должны иметь одинаковую форму.
+Вложенные слои входят в `nn.parameters`, обучение и сохранение модели.
+
+```uray
+model = nn.sequential([
+    nn.batch_norm_layer(32),
+    nn.dropout_layer(0.2),
+    nn.residual_layer([
+        nn.linear_layer(32, 64),
+        nn.activation_layer("relu"),
+        nn.linear_layer(64, 32)
+    ]),
+    nn.linear_layer(32, 10)
+])
+```
+
+U-Ray-функции также могут комбинировать операции, ветвить и повторно
 использовать результаты; для новой дифференцируемой примитивы её прямой и
 обратный проход добавляется в ядро.
 
@@ -291,6 +320,16 @@ loaded = nn.load_layers("model.json")
 мини-батчам. NumPy backend ускоряет
 `matmul`, свёртки и pooling; на стандартном Python backend подходят небольшие
 датасеты и проверки.
+
+Сохранение модели включает параметры BatchNorm, running statistics, Dropout и
+вложенные residual-ветви; при загрузке восстановленные слои готовы к оценке
+или дальнейшему обучению.
+
+Пример всех трёх слоёв в обучаемом классификаторе:
+
+```
+./uray examples/residual_regularization.ur
+```
 
 Полный пример сверточной сети на MNIST:
 

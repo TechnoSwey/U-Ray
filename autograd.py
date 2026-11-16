@@ -1028,6 +1028,221 @@ class GradTensor(Tensor):
             output_data = output_data[0]
         return self._result(output_data, (self,), backward)
 
+    def batch_norm(
+        self,
+        weight,
+        bias,
+        running_mean,
+        running_var,
+        training=True,
+        momentum=0.1,
+        epsilon=1e-5,
+        axis=-1,
+    ):
+        """Normalize each feature over every dimension except ``axis``."""
+        weight = as_grad_tensor(weight)
+        bias = as_grad_tensor(bias)
+        shape = self.shape()
+        if not shape or not isinstance(axis, int) or isinstance(axis, bool):
+            raise RuntimeErrorUray("batch_norm ожидает тензор и целую ось признаков")
+        if axis < 0:
+            axis += len(shape)
+        if axis < 0 or axis >= len(shape):
+            raise RuntimeErrorUray("batch_norm: ось вне диапазона")
+        feature_count = shape[axis]
+        if (
+            weight.shape() != [feature_count]
+            or bias.shape() != [feature_count]
+            or not isinstance(running_mean, list)
+            or not isinstance(running_var, list)
+            or len(running_mean) != feature_count
+            or len(running_var) != feature_count
+        ):
+            raise RuntimeErrorUray(
+                "batch_norm: размерность параметров должна совпадать с числом признаков"
+            )
+        if not isinstance(training, bool):
+            raise RuntimeErrorUray("batch_norm: training должен быть bool")
+        if not isinstance(momentum, (int, float)) or not 0.0 <= momentum <= 1.0:
+            raise RuntimeErrorUray("batch_norm: momentum должен быть в диапазоне [0, 1]")
+        if not isinstance(epsilon, (int, float)) or epsilon <= 0:
+            raise RuntimeErrorUray("batch_norm: epsilon должен быть > 0")
+
+        np = get_numpy()
+        if np is not None:
+            array = np.asarray(self.data, dtype=float)
+            reduction_axes = tuple(
+                index for index in range(len(shape)) if index != axis
+            )
+            if training:
+                mean = array.mean(axis=reduction_axes)
+                variance = array.var(axis=reduction_axes)
+                for index in range(feature_count):
+                    running_mean[index] = (
+                        (1.0 - momentum) * running_mean[index]
+                        + momentum * float(mean[index])
+                    )
+                    running_var[index] = (
+                        (1.0 - momentum) * running_var[index]
+                        + momentum * float(variance[index])
+                    )
+            else:
+                mean = np.asarray(running_mean, dtype=float)
+                variance = np.asarray(running_var, dtype=float)
+            broadcast_shape = [1] * len(shape)
+            broadcast_shape[axis] = feature_count
+            mean_view = mean.reshape(broadcast_shape)
+            inverse_std = 1.0 / np.sqrt(
+                variance.reshape(broadcast_shape) + float(epsilon)
+            )
+            normalized = (array - mean_view) * inverse_std
+            output = (
+                normalized * np.asarray(weight.data, dtype=float).reshape(broadcast_shape)
+                + np.asarray(bias.data, dtype=float).reshape(broadcast_shape)
+            )
+            reduction_count = math.prod(
+                dimension for index, dimension in enumerate(shape) if index != axis
+            )
+
+            def backward(gradient):
+                grad = np.asarray(gradient, dtype=float)
+                grad_weight = np.sum(grad * normalized, axis=reduction_axes)
+                grad_bias = np.sum(grad, axis=reduction_axes)
+                scaled_weight = np.asarray(weight.data, dtype=float).reshape(
+                    broadcast_shape
+                )
+                if training:
+                    grad_sum = np.sum(grad, axis=reduction_axes).reshape(
+                        broadcast_shape
+                    )
+                    normalized_grad_sum = np.sum(
+                        grad * normalized, axis=reduction_axes
+                    ).reshape(broadcast_shape)
+                    grad_input = (
+                        scaled_weight * inverse_std / reduction_count
+                        * (
+                            reduction_count * grad
+                            - grad_sum
+                            - normalized * normalized_grad_sum
+                        )
+                    )
+                else:
+                    grad_input = scaled_weight * inverse_std * grad
+                return (
+                    _array_to_data(grad_input),
+                    _array_to_data(grad_weight),
+                    _array_to_data(grad_bias),
+                )
+
+            return self._result(
+                _array_to_data(output), (self, weight, bias), backward
+            )
+
+        flat = _flatten(self.data)
+        inner_size = math.prod(shape[axis + 1:]) if axis + 1 < len(shape) else 1
+        groups = [[] for _ in range(feature_count)]
+        for index, value in enumerate(flat):
+            feature = (index // inner_size) % feature_count
+            groups[feature].append(float(value))
+
+        if training:
+            means = [sum(group) / len(group) for group in groups]
+            variances = [
+                sum((value - means[i]) ** 2 for value in group) / len(group)
+                for i, group in enumerate(groups)
+            ]
+            for index in range(feature_count):
+                running_mean[index] = (
+                    (1.0 - momentum) * running_mean[index]
+                    + momentum * means[index]
+                )
+                running_var[index] = (
+                    (1.0 - momentum) * running_var[index]
+                    + momentum * variances[index]
+                )
+        else:
+            means = [float(value) for value in running_mean]
+            variances = [float(value) for value in running_var]
+
+        inverse_std = [
+            1.0 / math.sqrt(variance + epsilon) for variance in variances
+        ]
+        normalized_groups = [
+            [
+                (value - means[index]) * inverse_std[index]
+                for value in group
+            ]
+            for index, group in enumerate(groups)
+        ]
+        output_groups = [
+            [
+                normalized * weight.data[feature] + bias.data[feature]
+                for normalized in normalized_groups[feature]
+            ]
+            for feature in range(feature_count)
+        ]
+        offsets = [0] * feature_count
+        output_flat = []
+        for index in range(len(flat)):
+            feature = (index // inner_size) % feature_count
+            output_flat.append(output_groups[feature][offsets[feature]])
+            offsets[feature] += 1
+        output_data = _from_flat(output_flat, shape)
+        parents = (self, weight, bias)
+
+        def backward(gradient):
+            grad_flat = _flatten(gradient)
+            grad_groups = [[] for _ in range(feature_count)]
+            offsets = [0] * feature_count
+            for index, value in enumerate(grad_flat):
+                feature = (index // inner_size) % feature_count
+                grad_groups[feature].append(float(value))
+                offsets[feature] += 1
+
+            input_grad_groups = []
+            weight_grad = []
+            bias_grad = []
+            for feature, grad_group in enumerate(grad_groups):
+                normalized = normalized_groups[feature]
+                grad_sum = sum(grad_group)
+                normalized_grad_sum = sum(
+                    grad * value for grad, value in zip(grad_group, normalized)
+                )
+                weight_grad.append(normalized_grad_sum)
+                bias_grad.append(grad_sum)
+                if training:
+                    count = len(grad_group)
+                    input_grad_groups.append([
+                        weight.data[feature] * inverse_std[feature] / count
+                        * (
+                            count * grad
+                            - grad_sum
+                            - value * normalized_grad_sum
+                        )
+                        for grad, value in zip(grad_group, normalized)
+                    ])
+                else:
+                    input_grad_groups.append([
+                        grad * weight.data[feature] * inverse_std[feature]
+                        for grad in grad_group
+                    ])
+
+            offsets = [0] * feature_count
+            input_grad_flat = []
+            for index in range(len(flat)):
+                feature = (index // inner_size) % feature_count
+                input_grad_flat.append(
+                    input_grad_groups[feature][offsets[feature]]
+                )
+                offsets[feature] += 1
+            return (
+                _from_flat(input_grad_flat, shape),
+                weight_grad,
+                bias_grad,
+            )
+
+        return self._result(output_data, parents, backward)
+
     def backward(self, gradient=None):
         if not self.requires_grad:
             raise RuntimeErrorUray("Нельзя вызвать backward у тензора без градиента")
