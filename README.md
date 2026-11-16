@@ -62,6 +62,7 @@ python3 main.py examples/save_load.ur
 ./uray examples/numpy_backend.ur --backend=numpy
 python3 examples/download_mnist.py
 ./uray examples/mnist.ur --backend=numpy
+./uray examples/mnist_cnn.ur --backend=numpy
 ./uray check examples/mlp_xor.ur
 ./uray fmt examples/mlp_xor.ur
 ./uray fmt --write examples/mlp_xor.ur
@@ -70,20 +71,21 @@ python3 examples/download_mnist.py
 Без имени файла `uray` тоже открывает REPL. Базовый backend не требует
 сторонних библиотек; `--backend=numpy` ускоряет тензорные операции, если
 установлен NumPy (`python3 -m pip install numpy`); для MLP он также включает
-векторизованное обучение мини-батчами. `nn.load_mnist("data/mnist")` читает
+векторизованное обучение мини-батчами, а общий autodiff backend ускоряет
+матричные операции и свёртки. `nn.load_mnist("data/mnist")` читает
 полный датасет из стандартных IDX-файлов, не разворачивая изображения в
 огромные Python-списки. Скрипт `examples/download_mnist.py` скачивает архивы,
-а `examples/mnist.ur` запускает обучение, оценку и предсказание. В интерактивном
-режиме Tab дополняет имена переменных, встроенные функции, модули и поля
-структур на платформах с Python `readline`.
+а `examples/mnist.ur` и `examples/mnist_cnn.ur` показывают обучение MLP и CNN.
+В интерактивном режиме Tab дополняет имена переменных, встроенные функции,
+модули и поля структур на платформах с Python `readline`.
 
 ## Возможности
 
 | Язык | Математика | Машинное обучение |
 | --- | --- | --- |
-| Функции, рекурсия, условия и циклы | Встроенные `math` и `linalg` | `nn`: dense-слои, MLP, backprop и MNIST IDX |
-| Списки, словари, кортежи и строки | Python по умолчанию, NumPy по выбору | SGD, Momentum, Adam и векторизованные мини-батчи |
-| Деструктуризация структур в `match` | Python по умолчанию, NumPy по выбору | Прогресс обучения, оценка и экспорт в PyTorch |
+| Функции, рекурсия, условия и циклы | Встроенные `math` и `linalg` | `nn`: MLP, autodiff, Conv2D и MNIST |
+| Списки, словари, кортежи и строки | Python по умолчанию, NumPy по выбору | Составляемые Dense- и сверточные слои |
+| Деструктуризация структур в `match` | `matmul`, свёртки, pooling и активации | SGD, Adam, обучение батчами и метрики |
 | REPL с Tab-дополнением и CLI | `uray fmt` для единого стиля | Предварительная проверка размерностей ML |
 | Сохранение и загрузка моделей | Без обязательных зависимостей | Подсветка для VS Code и Termux |
 
@@ -140,6 +142,7 @@ print("accuracy:", metrics[1])
 | [`save_load.ur`](examples/save_load.ur) | Обучение XOR, сохранение модели в JSON и загрузка для предсказаний |
 | [`train_batch_example.ur`](examples/train_batch_example.ur) | Синтетические данные, MLP и пакетное обучение с Adam |
 | [`mnist.ur`](examples/mnist.ur) | Загружает полный MNIST, обучает классификатор, оценивает его и сохраняет модель |
+| [`mnist_cnn.ur`](examples/mnist_cnn.ur) | Обучает сверточную модель через общий autodiff и сохраняет её |
 | [`progress.ur`](examples/progress.ur) | Показывает прогресс обучения и текущий loss после каждой эпохи |
 
 [Каталог примеров и команды запуска →](examples/README.md)

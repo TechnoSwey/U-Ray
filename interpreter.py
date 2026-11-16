@@ -8,6 +8,7 @@ from values import (
     check_key, deep_equal, format_value
 )
 from tensor import Tensor
+from autograd import GradTensor, as_grad_tensor
 from modules import ModuleRegistry
 from ast_nodes import (
     Program, Import, Assign, Del, Print, Number, Str, Var, BinOp,
@@ -778,6 +779,8 @@ class Interpreter:
             return self.eval_call(node)
         if isinstance(node, UnaryOp):
             val = self.eval_expr(node.operand)
+            if isinstance(val, GradTensor):
+                return val.scalar_mul(-1.0) if node.op == "-" else val
             if isinstance(val, bool):
                 raise RuntimeErrorUray(f"Унарный оператор {node.op!r} недопустим для bool")
             if not isinstance(val, (int, float)):
@@ -808,6 +811,24 @@ class Interpreter:
             if op in ("<", ">", "<=", ">="):
                 return self._cmp(op, int(left), int(right))
             raise RuntimeErrorUray(f"Операция {op!r} недопустима для булевых")
+        if isinstance(left, GradTensor) or isinstance(right, GradTensor):
+            if op == "+":
+                return as_grad_tensor(left).add(right)
+            if op == "-":
+                return as_grad_tensor(left).sub(right)
+            if op == "*":
+                return as_grad_tensor(left).mul(right)
+            if op == "/":
+                return as_grad_tensor(left).div(right)
+            if op == "**":
+                if not isinstance(left, GradTensor) or not isinstance(
+                    right, (int, float)
+                ):
+                    raise RuntimeErrorUray("Степень тензора должна быть числом")
+                return left.pow(right)
+            raise RuntimeErrorUray(
+                f"Операция {op!r} недопустима для тензоров"
+            )
         if not isinstance(left, (int, float)) or not isinstance(right, (int, float)):
             raise RuntimeErrorUray(f"Операция {op!r} недопустима для {type(left).__name__} и {type(right).__name__}")
         if op == "+":

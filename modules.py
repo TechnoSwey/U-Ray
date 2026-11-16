@@ -9,6 +9,7 @@ import values
 from errors import RuntimeErrorUray as R
 from values import DictValue, Builtin, Module, Function
 from tensor import Tensor, get_numpy
+from autograd import GradTensor, as_grad_tensor
 from mnist import MNISTView, load_mnist_directory
 
 
@@ -184,6 +185,470 @@ class ModuleRegistry:
             ensure_vector(name, vector)
             return vector
 
+        def grad_tensor(args):
+            if len(args) not in (1, 2):
+                raise R("nn.tensor ожидает data и необязательный requires_grad")
+            requires_grad = args[1] if len(args) == 2 else False
+            if not isinstance(requires_grad, bool):
+                raise R("nn.tensor: requires_grad должен быть bool")
+            try:
+                return as_grad_tensor(args[0], requires_grad=requires_grad)
+            except (TypeError, ValueError, OverflowError) as e:
+                raise R(f"nn.tensor: некорректные данные: {e}")
+
+        def parameter(args):
+            if len(args) != 1:
+                raise R("nn.parameter ожидает данные")
+            try:
+                return as_grad_tensor(args[0], requires_grad=True)
+            except (TypeError, ValueError, OverflowError) as e:
+                raise R(f"nn.parameter: некорректные данные: {e}")
+
+        def _grad_operand(name, value):
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                return as_grad_tensor(float(value))
+            if isinstance(value, (Tensor, list)):
+                try:
+                    return as_grad_tensor(value)
+                except (TypeError, ValueError, OverflowError) as e:
+                    raise R(f"nn.{name}: некорректный тензор: {e}")
+            raise R(f"nn.{name}: ожидался тензор или число")
+
+        def grad_add(args):
+            if len(args) != 2: raise R("nn.add ожидает 2 аргумента")
+            return _grad_operand("add", args[0]).add(args[1])
+
+        def grad_sub(args):
+            if len(args) != 2: raise R("nn.sub ожидает 2 аргумента")
+            return _grad_operand("sub", args[0]).sub(args[1])
+
+        def grad_mul(args):
+            if len(args) != 2: raise R("nn.multiply ожидает 2 аргумента")
+            return _grad_operand("multiply", args[0]).mul(args[1])
+
+        def grad_div(args):
+            if len(args) != 2: raise R("nn.divide ожидает 2 аргумента")
+            return _grad_operand("divide", args[0]).div(args[1])
+
+        def grad_matmul(args):
+            if len(args) != 2: raise R("nn.matmul ожидает 2 аргумента")
+            return _grad_operand("matmul", args[0]).matmul(args[1])
+
+        def grad_reshape(args):
+            if len(args) != 2: raise R("nn.reshape ожидает tensor и shape")
+            if not isinstance(args[1], list):
+                raise R("nn.reshape: shape должен быть списком")
+            return _grad_operand("reshape", args[0]).reshape(args[1])
+
+        def grad_sum(args):
+            if len(args) != 1: raise R("nn.reduce_sum ожидает 1 аргумент")
+            return _grad_operand("reduce_sum", args[0]).sum_all()
+
+        def grad_mean(args):
+            if len(args) != 1: raise R("nn.mean ожидает 1 аргумент")
+            return _grad_operand("mean", args[0]).mean()
+
+        def grad_cross_entropy(args):
+            if len(args) != 2:
+                raise R("nn.cross_entropy ожидает logits и labels")
+            return _grad_operand("cross_entropy", args[0]).cross_entropy(args[1])
+
+        def grad_binary_cross_entropy(args):
+            if len(args) != 2:
+                raise R("nn.binary_cross_entropy ожидает logits и labels")
+            return _grad_operand("binary_cross_entropy", args[0]).binary_cross_entropy(args[1])
+
+        def grad_backward(args):
+            if len(args) not in (1, 2):
+                raise R("nn.backward ожидает loss и необязательный градиент")
+            value = args[0]
+            if not isinstance(value, GradTensor):
+                raise R("nn.backward ожидает тензор с графом градиентов")
+            value.backward(args[1] if len(args) == 2 else None)
+            return 0
+
+        def grad_value(args):
+            if len(args) != 1 or not isinstance(args[0], GradTensor):
+                raise R("nn.grad ожидает параметр GradTensor")
+            return Tensor(args[0].grad) if args[0].grad is not None else None
+
+        def grad_item(args):
+            if len(args) != 1 or not isinstance(args[0], GradTensor):
+                raise R("nn.item ожидает скалярный GradTensor")
+            return args[0].item()
+
+        def _collect_parameters(value, result=None, seen=None):
+            if result is None:
+                result, seen = [], set()
+            if isinstance(value, GradTensor):
+                if value.requires_grad and id(value) not in seen:
+                    seen.add(id(value))
+                    result.append(value)
+            elif isinstance(value, DictValue):
+                for _, child in value.items():
+                    _collect_parameters(child, result, seen)
+            elif isinstance(value, (list, tuple)):
+                for child in value:
+                    _collect_parameters(child, result, seen)
+            return result
+
+        def grad_parameters(args):
+            if len(args) != 1:
+                raise R("nn.parameters ожидает модель или список параметров")
+            return _collect_parameters(args[0])
+
+        def grad_zero(args):
+            if len(args) != 1:
+                raise R("nn.zero_grad ожидает модель или список параметров")
+            for param in _collect_parameters(args[0]):
+                param.zero_grad()
+            return 0
+
+        def grad_sgd(args):
+            if len(args) != 2:
+                raise R("nn.sgd_update ожидает параметры и learning_rate")
+            params, learning_rate = args
+            ensure_number("sgd_update", learning_rate)
+            if learning_rate <= 0:
+                raise R("nn.sgd_update: learning_rate должен быть > 0")
+            for param in _collect_parameters(params):
+                param.apply_sgd(float(learning_rate))
+            return params
+
+        def grad_conv2d(args):
+            if len(args) < 2 or len(args) > 5:
+                raise R("nn.conv2d ожидает input, weight, bias?, stride?, padding?")
+            source = _grad_operand("conv2d", args[0])
+            bias = args[2] if len(args) >= 3 else None
+            stride = args[3] if len(args) >= 4 else 1
+            padding = args[4] if len(args) >= 5 else 0
+            return source.conv2d(args[1], bias, stride, padding)
+
+        def grad_max_pool2d(args):
+            if len(args) not in (2, 3):
+                raise R("nn.max_pool2d ожидает input, kernel_size и stride?")
+            stride = args[2] if len(args) == 3 else None
+            return _grad_operand("max_pool2d", args[0]).max_pool2d(args[1], stride)
+
+        def _positive_int(name, value):
+            if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+                raise R(f"nn.{name}: значение должно быть положительным целым")
+
+        def linear_layer(args):
+            if len(args) != 2:
+                raise R("nn.linear_layer ожидает input_size и output_size")
+            in_dim, out_dim = args
+            _positive_int("linear_layer", in_dim)
+            _positive_int("linear_layer", out_dim)
+            initialized = _init_layer_weights(in_dim, out_dim, "relu")
+            layer = DictValue()
+            layer["kind"] = "linear"
+            layer["W"] = as_grad_tensor(initialized["W"], requires_grad=True)
+            layer["b"] = as_grad_tensor(initialized["b"], requires_grad=True)
+            return layer
+
+        def conv2d_layer(args):
+            if len(args) not in (3, 4, 5):
+                raise R("nn.conv2d_layer ожидает in_channels, out_channels, kernel, stride?, padding?")
+            in_channels, out_channels, kernel = args[:3]
+            _positive_int("conv2d_layer", in_channels)
+            _positive_int("conv2d_layer", out_channels)
+            if isinstance(kernel, int) and not isinstance(kernel, bool):
+                kernel_h = kernel_w = kernel
+            elif isinstance(kernel, list) and len(kernel) == 2:
+                kernel_h, kernel_w = kernel
+            else:
+                raise R("nn.conv2d_layer: kernel должен быть числом или [height, width]")
+            _positive_int("conv2d_layer", kernel_h)
+            _positive_int("conv2d_layer", kernel_w)
+            stride = args[3] if len(args) >= 4 else 1
+            padding = args[4] if len(args) >= 5 else 0
+            _positive_int("conv2d_layer stride", stride)
+            if not isinstance(padding, int) or isinstance(padding, bool) or padding < 0:
+                raise R("nn.conv2d_layer: padding должен быть целым >= 0")
+            fan_in = in_channels * kernel_h * kernel_w
+            limit = _pymath.sqrt(6.0 / fan_in)
+            weights = [
+                [
+                    [
+                        [(_pyrandom.random() * 2.0 - 1.0) * limit for _ in range(kernel_w)]
+                        for _ in range(kernel_h)
+                    ]
+                    for _ in range(in_channels)
+                ]
+                for _ in range(out_channels)
+            ]
+            layer = DictValue()
+            layer["kind"] = "conv2d"
+            layer["W"] = as_grad_tensor(weights, requires_grad=True)
+            layer["b"] = as_grad_tensor([0.0] * out_channels, requires_grad=True)
+            layer["stride"] = stride
+            layer["padding"] = padding
+            return layer
+
+        def activation_layer(args):
+            if len(args) != 1 or args[0] not in ("relu", "sigmoid", "tanh", "softmax"):
+                raise R("nn.activation_layer ожидает relu, sigmoid, tanh или softmax")
+            layer = DictValue()
+            layer["kind"] = "activation"
+            layer["name"] = args[0]
+            return layer
+
+        def pool2d_layer(args):
+            if len(args) not in (1, 2):
+                raise R("nn.max_pool2d_layer ожидает kernel_size и stride?")
+            kernel = args[0]
+            stride = args[1] if len(args) == 2 else kernel
+            _positive_int("max_pool2d_layer", kernel)
+            _positive_int("max_pool2d_layer", stride)
+            layer = DictValue()
+            layer["kind"] = "max_pool2d"
+            layer["kernel"] = kernel
+            layer["stride"] = stride
+            return layer
+
+        def flatten_layer(args):
+            if args:
+                raise R("nn.flatten_layer не ожидает аргументов")
+            layer = DictValue()
+            layer["kind"] = "flatten"
+            return layer
+
+        def sequential(args):
+            if len(args) != 1 or not isinstance(args[0], list):
+                raise R("nn.sequential ожидает список слоёв")
+            model = DictValue()
+            model["kind"] = "sequential"
+            model["layers"] = args[0]
+            return model
+
+        def forward_layers(args):
+            if len(args) != 2:
+                raise R("nn.forward_layers ожидает модель и вход")
+            model, source = args
+            layers = model["layers"] if isinstance(model, DictValue) else model
+            if not isinstance(layers, list):
+                raise R("nn.forward_layers ожидает список слоёв или sequential-модель")
+            output = _grad_operand("forward_layers", source)
+            for layer in layers:
+                if not isinstance(layer, DictValue) or "kind" not in layer:
+                    raise R("nn.forward_layers: каждый элемент должен быть слоем")
+                kind = layer["kind"]
+                if kind == "linear":
+                    weights = layer["W"]
+                    if len(output.shape()) == 1:
+                        output = weights.matmul(output)
+                    elif len(output.shape()) == 2:
+                        output = output.matmul(weights.transpose())
+                    else:
+                        raise R("linear слой ожидает вектор или матрицу [batch, features]")
+                    output = output.add(layer["b"])
+                elif kind == "conv2d":
+                    output = output.conv2d(
+                        layer["W"], layer["b"], layer["stride"], layer["padding"]
+                    )
+                elif kind == "activation":
+                    name = layer["name"]
+                    output = {
+                        "relu": output.relu,
+                        "sigmoid": output.sigmoid,
+                        "tanh": output.tanh,
+                        "softmax": output.softmax,
+                    }[name]()
+                elif kind == "max_pool2d":
+                    output = output.max_pool2d(layer["kernel"], layer["stride"])
+                elif kind == "flatten":
+                    output = output.flatten()
+                else:
+                    raise R(f"nn.forward_layers: неизвестный тип слоя {kind!r}")
+            return output
+
+        def _autograd_batch(view, indices, name):
+            if isinstance(view, MNISTView):
+                numpy = get_numpy()
+                if numpy is None and len(view) >= 10000:
+                    raise R(
+                        f"nn.{name}: для полного MNIST набора выберите "
+                        "--backend=numpy"
+                    )
+                if numpy is not None:
+                    return view.batch(indices, numpy).tolist()
+                return [view.sample(index) for index in indices]
+            if isinstance(view, Tensor):
+                return [view.get(index) for index in indices]
+            if isinstance(view, list):
+                return [view[index] for index in indices]
+            raise R(f"nn.{name}: X и Y должны быть списками, тензорами или MNIST view")
+
+        def _autograd_loss(logits, target, loss_name):
+            if loss_name == "cce":
+                return logits.cross_entropy(target)
+            if loss_name == "bce":
+                return logits.binary_cross_entropy(target)
+            if loss_name == "mse":
+                return logits.mse_loss(target)
+            raise R(f"nn: неизвестная функция потерь {loss_name!r}")
+
+        def _prepare_graph_input(batch, input_shape):
+            value = as_grad_tensor(batch)
+            if input_shape is not None:
+                if not isinstance(input_shape, list) or any(
+                    not isinstance(dim, int) or isinstance(dim, bool) or dim <= 0
+                    for dim in input_shape
+                ):
+                    raise R("input_shape должен содержать положительные целые размеры")
+                value = value.reshape([len(batch)] + input_shape)
+            return value
+
+        def train_layers(args):
+            if len(args) < 6 or len(args) > 10:
+                raise R(
+                    "nn.train_layers ожидает model, X, Y, epochs, lr, batch_size, "
+                    "loss?, optimizer?, show_progress?, input_shape?"
+                )
+            model, X, Y, epochs, learning_rate, batch_size = args[:6]
+            loss_name = args[6] if len(args) >= 7 else "cce"
+            optimizer = args[7] if len(args) >= 8 else "adam"
+            show_progress = args[8] if len(args) >= 9 else True
+            input_shape = args[9] if len(args) >= 10 else None
+            if (
+                not isinstance(model, DictValue)
+                or "kind" not in model
+                or model["kind"] != "sequential"
+            ):
+                raise R("nn.train_layers ожидает модель nn.sequential")
+            if not isinstance(epochs, int) or isinstance(epochs, bool) or epochs <= 0:
+                raise R("nn.train_layers: epochs должен быть положительным целым")
+            if not isinstance(batch_size, int) or isinstance(batch_size, bool) or batch_size <= 0:
+                raise R("nn.train_layers: batch_size должен быть положительным целым")
+            ensure_number("train_layers", learning_rate)
+            if learning_rate <= 0:
+                raise R("nn.train_layers: lr должен быть > 0")
+            if loss_name not in ("cce", "bce", "mse"):
+                raise R("nn.train_layers: loss должен быть cce, bce или mse")
+            if optimizer not in ("adam", "sgd"):
+                raise R("nn.train_layers: optimizer должен быть adam или sgd")
+            if not isinstance(show_progress, bool):
+                raise R("nn.train_layers: show_progress должен быть bool")
+            try:
+                sample_count = len(X)
+                if len(Y) != sample_count or sample_count == 0:
+                    raise R("nn.train_layers: X и Y должны иметь одинаковую длину > 0")
+            except TypeError as error:
+                raise R("nn.train_layers: X и Y должны иметь длину") from error
+            params = _collect_parameters(model)
+            if not params:
+                raise R("nn.train_layers: в модели нет обучаемых параметров")
+            adam_states = {id(param): {} for param in params}
+            history = []
+            order = list(range(sample_count))
+            batches_per_epoch = _pymath.ceil(sample_count / batch_size)
+            total_steps = epochs * batches_per_epoch
+            for epoch in range(epochs):
+                _pyrandom.shuffle(order)
+                epoch_loss = 0.0
+                for batch_index, start in enumerate(
+                    range(0, sample_count, batch_size)
+                ):
+                    indices = order[start:start + batch_size]
+                    x_batch = _autograd_batch(X, indices, "train_layers")
+                    y_batch = _autograd_batch(Y, indices, "train_layers")
+                    x_value = _prepare_graph_input(x_batch, input_shape)
+                    y_value = as_grad_tensor(y_batch)
+                    logits = forward_layers([model, x_value])
+                    loss_value = _autograd_loss(logits, y_value, loss_name)
+                    loss_value.backward()
+                    for param in params:
+                        if optimizer == "adam":
+                            param.apply_adam(
+                                float(learning_rate), adam_states[id(param)]
+                            )
+                        else:
+                            param.apply_sgd(float(learning_rate))
+                        param.zero_grad()
+                    epoch_loss += loss_value.item() * len(indices)
+                    if show_progress:
+                        completed_steps = epoch * batches_per_epoch + batch_index + 1
+                        width = 20
+                        filled = int(width * completed_steps / total_steps)
+                        bar = "█" * filled + "░" * (width - filled)
+                        running_loss = epoch_loss / (start + len(indices))
+                        print(
+                            f"\r[{bar}] "
+                            f"{int(100 * completed_steps / total_steps)}% "
+                            f"loss: {running_loss:.6g}",
+                            end="",
+                            flush=True,
+                        )
+                mean_loss = epoch_loss / sample_count
+                history.append(mean_loss)
+            if show_progress:
+                print()
+            return history
+
+        def evaluate_layers(args):
+            if len(args) < 3 or len(args) > 5:
+                raise R("nn.evaluate_layers ожидает model, X, Y, loss?, input_shape?")
+            model, X, Y = args[:3]
+            loss_name = args[3] if len(args) >= 4 else "cce"
+            input_shape = args[4] if len(args) >= 5 else None
+            try:
+                sample_count = len(X)
+                if len(Y) != sample_count or sample_count == 0:
+                    raise R("nn.evaluate_layers: X и Y должны иметь одинаковую длину > 0")
+            except TypeError as error:
+                raise R("nn.evaluate_layers: X и Y должны иметь длину") from error
+            total_loss = 0.0
+            correct = 0
+            for start in range(0, sample_count, 256):
+                indices = list(range(start, min(start + 256, sample_count)))
+                x_batch = _autograd_batch(X, indices, "evaluate_layers")
+                y_batch = _autograd_batch(Y, indices, "evaluate_layers")
+                logits = forward_layers([
+                    model, _prepare_graph_input(x_batch, input_shape)
+                ])
+                target = as_grad_tensor(y_batch)
+                total_loss += _autograd_loss(logits, target, loss_name).item() * len(indices)
+                output = logits.data
+                if len(logits.shape()) == 2:
+                    if logits.shape()[1] == 1:
+                        for row, label in zip(output, y_batch):
+                            target_value = label[0] if isinstance(label, list) else label
+                            if (row[0] >= 0.0) == (target_value >= 0.5):
+                                correct += 1
+                    else:
+                        for row, label in zip(output, y_batch):
+                            if row.index(max(row)) == label.index(max(label)):
+                                correct += 1
+            return [total_loss / sample_count, correct / sample_count]
+
+        def predict_layers(args):
+            if len(args) < 2 or len(args) > 4:
+                raise R("nn.predict_layers ожидает model, X, limit?, input_shape?")
+            model, X = args[:2]
+            limit = args[2] if len(args) >= 3 else None
+            input_shape = args[3] if len(args) >= 4 else None
+            if limit is not None and (
+                not isinstance(limit, int) or isinstance(limit, bool) or limit < 0
+            ):
+                raise R("nn.predict_layers: limit должен быть целым >= 0")
+            count = len(X)
+            if limit is not None:
+                count = min(count, limit)
+            predictions = []
+            for start in range(0, count, 256):
+                indices = list(range(start, min(start + 256, count)))
+                x_batch = _autograd_batch(X, indices, "predict_layers")
+                logits = forward_layers([
+                    model, _prepare_graph_input(x_batch, input_shape)
+                ])
+                if len(logits.shape()) == 2 and logits.shape()[1] == 1:
+                    probabilities = logits.sigmoid().data
+                else:
+                    probabilities = logits.softmax().data
+                predictions.extend(probabilities)
+            return predictions
+
         def layer_data(name, layer):
             if not isinstance(layer, DictValue) or "W" not in layer or "b" not in layer:
                 raise R(f"nn.{name} ожидает слой")
@@ -262,6 +727,8 @@ class ModuleRegistry:
 
         def relu(args):
             if len(args) != 1: raise R("nn.relu ожидает 1 аргумент")
+            if isinstance(args[0], GradTensor):
+                return args[0].relu()
             ensure_number("relu", args[0])
             return max(0.0, float(args[0]))
 
@@ -273,8 +740,17 @@ class ModuleRegistry:
 
         def sigmoid(args):
             if len(args) != 1: raise R("nn.sigmoid ожидает 1 аргумент")
+            if isinstance(args[0], GradTensor):
+                return args[0].sigmoid()
             ensure_number("sigmoid", args[0])
             return _stable_sigmoid(args[0])
+
+        def tanh(args):
+            if len(args) != 1: raise R("nn.tanh ожидает 1 аргумент")
+            if isinstance(args[0], GradTensor):
+                return args[0].tanh()
+            ensure_number("tanh", args[0])
+            return _pymath.tanh(args[0])
 
         def relu_vec(args):
             if len(args) != 1: raise R("nn.relu_vec ожидает 1 аргумент")
@@ -296,6 +772,8 @@ class ModuleRegistry:
 
         def softmax(args):
             if len(args) != 1: raise R("nn.softmax ожидает 1 аргумент")
+            if isinstance(args[0], GradTensor):
+                return args[0].softmax()
             v = args[0]
             ensure_vector("softmax", v)
             return _softmax_vec(v)
@@ -303,6 +781,8 @@ class ModuleRegistry:
         def mse(args):
             if len(args) != 2: raise R("nn.mse ожидает 2 аргумента")
             yhat, y = args
+            if isinstance(yhat, GradTensor):
+                return yhat.mse_loss(y)
             ensure_vector("mse", yhat)
             ensure_vector("mse", y)
             if len(yhat) != len(y): raise R("nn.mse: длины не совпадают")
@@ -316,6 +796,8 @@ class ModuleRegistry:
         def bce(args):
             if len(args) != 2: raise R("nn.bce ожидает 2 аргумента")
             yhat, y = args
+            if isinstance(yhat, GradTensor):
+                return yhat.binary_cross_entropy_probabilities(y)
             ensure_vector("bce", yhat)
             ensure_vector("bce", y)
             if len(yhat) != len(y): raise R("nn.bce: длины не совпадают")
@@ -333,6 +815,8 @@ class ModuleRegistry:
         def categorical_cross_entropy(args):
             if len(args) != 2: raise R("nn.cce ожидает 2 аргумента")
             yhat, y = args
+            if isinstance(yhat, GradTensor):
+                return yhat.categorical_cross_entropy(y)
             ensure_vector("cce", yhat)
             ensure_vector("cce", y)
             if len(yhat) != len(y): raise R("nn.cce: длины не совпадают")
@@ -903,6 +1387,95 @@ class ModuleRegistry:
             except ValueError as e:
                 raise R(f"nn.load: некорректный JSON: {e}")
             return _plain_to_model(data)
+
+        def save_layers(args):
+            if len(args) != 2:
+                raise R("nn.save_layers ожидает sequential-модель и path")
+            model, path = args
+            if (
+                not isinstance(model, DictValue)
+                or "kind" not in model
+                or model["kind"] != "sequential"
+            ):
+                raise R("nn.save_layers ожидает модель nn.sequential")
+            if not isinstance(path, str):
+                raise R("nn.save_layers: path должен быть строкой")
+            plain_layers = []
+            for layer in model["layers"]:
+                if not isinstance(layer, DictValue) or "kind" not in layer:
+                    raise R("nn.save_layers: некорректный слой")
+                kind = layer["kind"]
+                plain = {"kind": kind}
+                if kind in ("linear", "conv2d"):
+                    plain["W"] = layer["W"].to_list()
+                    plain["b"] = layer["b"].to_list()
+                if kind == "conv2d":
+                    plain["stride"] = layer["stride"]
+                    plain["padding"] = layer["padding"]
+                elif kind == "activation":
+                    plain["name"] = layer["name"]
+                elif kind == "max_pool2d":
+                    plain["kernel"] = layer["kernel"]
+                    plain["stride"] = layer["stride"]
+                elif kind not in ("linear", "conv2d", "flatten"):
+                    raise R(f"nn.save_layers: неизвестный тип слоя {kind!r}")
+                plain_layers.append(plain)
+            data = {"format": "uray-sequential", "version": 1, "layers": plain_layers}
+            full_path = _resolve_path(path)
+            try:
+                with open(full_path, "w", encoding="utf-8") as output:
+                    json.dump(data, output, ensure_ascii=False, indent=2)
+            except OSError as error:
+                raise R(f"nn.save_layers: не удалось записать: {error}")
+            return full_path
+
+        def load_layers(args):
+            if len(args) != 1 or not isinstance(args[0], str):
+                raise R("nn.load_layers ожидает path")
+            full_path = _resolve_path(args[0])
+            try:
+                with open(full_path, "r", encoding="utf-8") as source:
+                    data = json.load(source)
+            except OSError as error:
+                raise R(f"nn.load_layers: не удалось прочитать: {error}")
+            except ValueError as error:
+                raise R(f"nn.load_layers: некорректный JSON: {error}")
+            if (
+                not isinstance(data, dict)
+                or data.get("format") != "uray-sequential"
+                or data.get("version") != 1
+                or not isinstance(data.get("layers"), list)
+            ):
+                raise R("nn.load_layers: неподдерживаемый формат модели")
+            layers = []
+            for plain in data["layers"]:
+                if not isinstance(plain, dict) or "kind" not in plain:
+                    raise R("nn.load_layers: некорректный слой")
+                kind = plain["kind"]
+                layer = DictValue()
+                layer["kind"] = kind
+                if kind in ("linear", "conv2d"):
+                    if "W" not in plain or "b" not in plain:
+                        raise R("nn.load_layers: в слое отсутствуют веса или bias")
+                    layer["W"] = as_grad_tensor(plain["W"], requires_grad=True)
+                    layer["b"] = as_grad_tensor(plain["b"], requires_grad=True)
+                if kind == "conv2d":
+                    layer["stride"] = plain.get("stride", 1)
+                    layer["padding"] = plain.get("padding", 0)
+                elif kind == "activation":
+                    if plain.get("name") not in ("relu", "sigmoid", "tanh", "softmax"):
+                        raise R("nn.load_layers: неизвестная активация")
+                    layer["name"] = plain["name"]
+                elif kind == "max_pool2d":
+                    layer["kernel"] = plain.get("kernel")
+                    layer["stride"] = plain.get("stride")
+                elif kind not in ("linear", "conv2d", "flatten"):
+                    raise R(f"nn.load_layers: неизвестный тип слоя {kind!r}")
+                layers.append(layer)
+            model = DictValue()
+            model["kind"] = "sequential"
+            model["layers"] = layers
+            return model
 
         def export_pytorch(args):
             if len(args) != 2:
@@ -1534,9 +2107,42 @@ class ModuleRegistry:
 
         return Module("nn", {
             "shape": Builtin("shape", shape),
+            "tensor": Builtin("tensor", grad_tensor),
+            "parameter": Builtin("parameter", parameter),
+            "add": Builtin("add", grad_add),
+            "sub": Builtin("sub", grad_sub),
+            "multiply": Builtin("multiply", grad_mul),
+            "divide": Builtin("divide", grad_div),
+            "matmul": Builtin("matmul", grad_matmul),
+            "reshape": Builtin("reshape", grad_reshape),
+            "reduce_sum": Builtin("reduce_sum", grad_sum),
+            "mean": Builtin("mean", grad_mean),
+            "cross_entropy": Builtin("cross_entropy", grad_cross_entropy),
+            "binary_cross_entropy": Builtin("binary_cross_entropy", grad_binary_cross_entropy),
+            "backward": Builtin("backward", grad_backward),
+            "grad": Builtin("grad", grad_value),
+            "item": Builtin("item", grad_item),
+            "parameters": Builtin("parameters", grad_parameters),
+            "zero_grad": Builtin("zero_grad", grad_zero),
+            "sgd_update": Builtin("sgd_update", grad_sgd),
+            "conv2d": Builtin("conv2d", grad_conv2d),
+            "max_pool2d": Builtin("max_pool2d", grad_max_pool2d),
+            "linear_layer": Builtin("linear_layer", linear_layer),
+            "conv2d_layer": Builtin("conv2d_layer", conv2d_layer),
+            "activation_layer": Builtin("activation_layer", activation_layer),
+            "max_pool2d_layer": Builtin("max_pool2d_layer", pool2d_layer),
+            "flatten_layer": Builtin("flatten_layer", flatten_layer),
+            "sequential": Builtin("sequential", sequential),
+            "forward_layers": Builtin("forward_layers", forward_layers),
+            "train_layers": Builtin("train_layers", train_layers),
+            "evaluate_layers": Builtin("evaluate_layers", evaluate_layers),
+            "predict_layers": Builtin("predict_layers", predict_layers),
+            "save_layers": Builtin("save_layers", save_layers),
+            "load_layers": Builtin("load_layers", load_layers),
             "relu": Builtin("relu", relu),
             "leaky_relu": Builtin("leaky_relu", leaky_relu),
             "sigmoid": Builtin("sigmoid", sigmoid),
+            "tanh": Builtin("tanh", tanh),
             "relu_vec": Builtin("relu_vec", relu_vec),
             "leaky_relu_vec": Builtin("leaky_relu_vec", leaky_relu_vec),
             "sigmoid_vec": Builtin("sigmoid_vec", sigmoid_vec),

@@ -1,0 +1,2 @@
+CNN forward/backward/update: true
+CNN logits shape: [1, 3]

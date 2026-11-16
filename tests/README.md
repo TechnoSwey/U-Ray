@@ -3,8 +3,8 @@
 Большинство тестов — `.ur`-файлы с ожидаемым выводом в `.expected`.
 Дополнительно runner проверяет CLI, а Python unit-тесты — formatter, REPL
 completion, статические размерности, VS Code manifest, PyTorch export,
-пустые тензоры и MNIST IDX-загрузчик. NumPy-тесты пропускаются, если
-зависимость не установлена.
+пустые тензоры, MNIST IDX-загрузчик и autodiff (включая численные проверки
+градиентов Conv2D). NumPy-тесты пропускаются, если зависимость не установлена.
 
 ## Как запускать
 
@@ -34,6 +34,11 @@ import_file.ur import из файлов
 ml_xor.ur ML: XOR (accuracy = 1.0)
 ml_spirals.ur ML: спирали (accuracy > 0.9)
 ml_multiclass.ur ML: 3 класса, softmax
+autograd_graph.ur Reverse-mode autodiff и обучение последовательной MLP
+autograd_conv.ur Conv2D, max-pooling и общий backward
+autograd_trainer.ur Универсальный trainer, evaluate и predict
+autograd_cnn_trainer.ur Обучение сверточной модели на пакетах
+test_autograd.py Градиенты, Conv2D, pooling, слои, optimizer и save/load
 test_mnist.py IDX-загрузчик, выборки, train/evaluate и согласованность backend
 evaluate_binary.ur Точность бинарной классификации
 math_overflow.ur Обработка переполнения в math.exp

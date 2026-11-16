@@ -11,14 +11,15 @@ ML-модуль U-Ray
 5. nn: слои и forward
 6. nn: backprop-примитивы
 7. nn: high-level API
-8. nn: загрузка MNIST
-9. nn: оптимизаторы
-10. nn: сохранение моделей
-11. Контракт skip_last_act
-12. Состояние оптимизатора и save/load
-13. Численная устойчивость
-14. Формат JSON
-15. Рецепты
+8. nn: autodiff и составляемые слои
+9. nn: загрузка MNIST
+10. nn: оптимизаторы
+11. nn: сохранение моделей
+12. Контракт skip_last_act
+13. Состояние оптимизатора и save/load
+14. Численная устойчивость
+15. Формат JSON
+16. Рецепты
 
 ---
 
@@ -224,6 +225,79 @@ history = nn.train(model, X, Y, 100, 0.01, 32, "bce", "adam", true)
 ```
 
 `nn.evaluate(model, X, Y, loss)` возвращает `[средний_loss, accuracy]`.
+
+---
+
+nn: autodiff и составляемые слои
+
+Общий reverse-mode autodiff позволяет строить граф из тензорных операций;
+градиенты считаются по графу, а не отдельной реализацией `backward` для каждой
+модели.
+
+```uray
+weight = nn.parameter([[0.2, -0.4], [0.7, 0.3]])
+x = nn.tensor([1.0, 0.0])
+logits = nn.matmul(weight, x)
+loss = nn.cross_entropy(logits, [1.0, 0.0])
+nn.backward(loss)
+grad_weight = nn.grad(weight)
+nn.sgd_update([weight], 0.01)
+nn.zero_grad([weight])
+```
+
+`nn.tensor(data[, requires_grad])` создаёт узел графа; `nn.parameter(data)`
+создаёт обучаемый параметр. Основные операции: `nn.add`, `nn.sub`,
+`nn.multiply`, `nn.divide`, `nn.matmul`, `nn.reshape`, `nn.reduce_sum`,
+`nn.mean`, `nn.relu`, `nn.sigmoid`, `nn.tanh`, `nn.softmax`, `nn.conv2d`,
+`nn.max_pool2d`, `nn.mse` и `nn.cross_entropy`. `nn.cross_entropy` принимает
+logits и one-hot labels; `nn.cce` по-прежнему принимает вероятности, как и
+прежний high-level API. Для `GradTensor` также работают `+`, `-`, `*`, `/`,
+`**` с числовой степенью и унарный минус; матричное умножение вызывается как
+`nn.matmul(a, b)`. `nn.backward(loss)` освобождает граф после прохода, чтобы
+держать расход памяти под контролем; для нового шага нужно выполнить forward
+заново.
+
+Слои можно собирать в последовательную сеть:
+
+```uray
+model = nn.sequential([
+    nn.conv2d_layer(1, 8, 3, 1, 1),
+    nn.activation_layer("relu"),
+    nn.max_pool2d_layer(2, 2),
+    nn.flatten_layer(),
+    nn.linear_layer(8 * 14 * 14, 10)
+])
+```
+
+Доступны `linear_layer`, `conv2d_layer`, `activation_layer`,
+`max_pool2d_layer` и `flatten_layer`. `nn.forward_layers(model, x)` запускает
+прямой проход. U-Ray-функции могут комбинировать операции, ветвить и повторно
+использовать результаты; для новой дифференцируемой примитивы её прямой и
+обратный проход добавляется в ядро.
+
+```uray
+history = nn.train_layers(
+    model, X, Y, 5, 0.001, 32, "cce", "adam", true
+)
+metrics = nn.evaluate_layers(model, X, Y, "cce")
+probabilities = nn.predict_layers(model, X, 10)
+nn.save_layers(model, "model.json")
+loaded = nn.load_layers("model.json")
+```
+
+`nn.train_layers` поддерживает loss `"cce"`, `"bce"` (логиты) и `"mse"`,
+оптимизаторы `"adam"` и `"sgd"`. `show_progress` по умолчанию включён. Для
+изображений укажи `input_shape`, например `[1, 28, 28]`; шкала обновляется по
+мини-батчам. NumPy backend ускоряет
+`matmul`, свёртки и pooling; на стандартном Python backend подходят небольшие
+датасеты и проверки.
+
+Полный пример сверточной сети на MNIST:
+
+```
+python3 examples/download_mnist.py
+./uray examples/mnist_cnn.ur --backend=numpy
+```
 
 ---
 
