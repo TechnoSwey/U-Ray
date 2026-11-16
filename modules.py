@@ -682,10 +682,14 @@ class ModuleRegistry:
         def _autograd_batch(view, indices, name):
             if isinstance(view, MNISTView):
                 numpy = get_numpy()
-                if numpy is None and len(view) >= 10000:
+                if (
+                    numpy is None
+                    and get_native() is None
+                    and len(view) >= 10000
+                ):
                     raise R(
                         f"nn.{name}: для полного MNIST набора выберите "
-                        "--backend=numpy"
+                        "--backend=native или --backend=numpy"
                     )
                 if numpy is not None:
                     return view.batch(indices, numpy).tolist()

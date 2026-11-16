@@ -333,10 +333,10 @@ loaded = nn.load_layers("model.json")
 `nn.train_layers` поддерживает loss `"cce"`, `"bce"` (логиты) и `"mse"`,
 оптимизаторы `"adam"` и `"sgd"`. `show_progress` по умолчанию включён. Для
 изображений укажи `input_shape`, например `[1, 28, 28]`; шкала обновляется по
-мини-батчам. Встроенный `native` backend ускоряет плотные MLP-слои и их
-обучение без NumPy; NumPy backend ускоряет `matmul`, свёртки и pooling в
-составных autodiff/CNN-моделях. На стандартном Python backend удобно проверять
-небольшие датасеты и примеры.
+мини-батчам. Встроенный `native` backend выполняет матричные умножения, Conv2D,
+ReLU и max-pooling в прямом и обратном проходах через C-ядра; CNN можно обучать без
+NumPy. Остальные операции autodiff остаются в обычном runtime U-Ray. На Python
+backend удобно проверять небольшие датасеты и примеры.
 
 Сохранение модели включает параметры BatchNorm, running statistics, Dropout и
 вложенные residual-ветви; при загрузке восстановленные слои готовы к оценке
@@ -358,7 +358,7 @@ loaded = nn.load_layers("model.json")
 
 ```
 python3 examples/download_mnist.py
-./uray examples/mnist_cnn.ur --backend=numpy
+./uray examples/mnist_cnn.ur --backend=native
 ```
 
 ---
@@ -458,13 +458,13 @@ python3 examples/download_mnist.py
 ./uray examples/mnist.ur --backend=native
 ```
 
-Этот backend ускоряет `nn.mlp`, `nn.train`, `nn.evaluate` и `nn.predict`;
+Этот backend ускоряет `nn.mlp`, `nn.train`, `nn.evaluate` и `nn.predict`, а
+также `matmul`, Conv2D, ReLU и max-pooling в обучаемых `nn.sequential`-моделях.
 AVX-512 и AVX2 выбираются автоматически, иначе используется переносимый
-скалярный код. NumPy backend по-прежнему нужен для некоторых составных
-autodiff/CNN-путей, например:
+скалярный код. Пример CNN на полном MNIST также работает без NumPy:
 
 ```
-./uray examples/mnist_cnn.ur --backend=numpy
+./uray examples/mnist_cnn.ur --backend=native
 ```
 
 Для сравнения полного обучения и оценки MLP на всех 60 000 train и 10 000 test
@@ -478,6 +478,15 @@ python3 benchmarks/benchmark_mnist.py
 `--backend=native` его не использует. Скрипт сравнивает одинаковую модель и
 один цикл train+evaluate, а также показывает отношение времени нативного
 backend к NumPy на текущем компьютере.
+
+Для замера Conv2D forward+backward на изображениях 28×28 и восьми фильтрах
+3×3 используй:
+
+```
+python3 benchmarks/benchmark_conv2d.py
+```
+
+Этот сравнительный скрипт тоже использует NumPy только как контрольный backend.
 
 ---
 

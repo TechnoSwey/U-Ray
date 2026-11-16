@@ -6,7 +6,7 @@ from pathlib import Path
 
 from autograd import GradTensor
 from modules import ModuleRegistry
-from tensor import set_backend
+from tensor import get_numpy, set_backend
 
 
 def _flatten_nested(value):
@@ -470,28 +470,146 @@ class AutogradTests(unittest.TestCase):
             import numpy  # noqa: F401
         except ImportError:
             self.skipTest("NumPy is optional")
+        try:
+            set_backend("native")
+        except RuntimeErrorUray as error:
+            self.skipTest(str(error))
         image = [[[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]]]]
         weight = [[[[0.5, -0.25], [0.75, 0.1]]]]
         outputs = []
         gradients = []
-        for backend in ("python", "numpy"):
+        for backend in ("python", "numpy", "native"):
             set_backend(backend)
             x = GradTensor(image, True)
             w = GradTensor(weight, True)
-            y = x.conv2d(w, [0.2], stride=1, padding=1)
+            bias = GradTensor([0.2], True)
+            y = x.conv2d(w, bias, stride=1, padding=1)
             outputs.append(y.data)
             y.mean().backward()
-            gradients.append((x.grad, w.grad))
-        for left, right in zip(
-            [value for value in _flatten_nested(outputs[0])],
-            [value for value in _flatten_nested(outputs[1])],
-        ):
-            self.assertAlmostEqual(left, right, places=12)
-        for left_group, right_group in zip(gradients[0], gradients[1]):
+            gradients.append((x.grad, w.grad, bias.grad))
+        for candidate in (1, 2):
+            for left, right in zip(
+                _flatten_nested(outputs[0]),
+                _flatten_nested(outputs[candidate]),
+            ):
+                self.assertAlmostEqual(left, right, places=12)
+            for left_group, right_group in zip(
+                gradients[0], gradients[candidate]
+            ):
+                for left, right in zip(
+                    _flatten_nested(left_group), _flatten_nested(right_group)
+                ):
+                    self.assertAlmostEqual(left, right, places=12)
+
+    def test_native_conv2d_matches_python_for_stride_and_multiple_channels(self):
+        image = [
+            [
+                [[((n + 1) * (y + 2) - x) / 7.0 for x in range(4)] for y in range(5)],
+                [[(n - y + 2 * x) / 9.0 for x in range(4)] for y in range(5)],
+            ]
+            for n in range(2)
+        ]
+        weights = [
+            [
+                [[(out + channel + y - x) / 11.0 for x in range(3)] for y in range(2)]
+                for channel in range(2)
+            ]
+            for out in range(3)
+        ]
+        bias_values = [0.1, -0.2, 0.3]
+        results = []
+        try:
+            set_backend("native")
+        except RuntimeErrorUray as error:
+            self.skipTest(str(error))
+        for backend in ("python", "native"):
+            set_backend(backend)
+            x = GradTensor(image, True)
+            w = GradTensor(weights, True)
+            bias = GradTensor(bias_values, True)
+            output = x.conv2d(w, bias, stride=2, padding=1)
+            probe = [
+                [
+                    [
+                        [((n + channel + y + x) % 5 - 2) / 7.0
+                         for x in range(output.shape()[3])]
+                        for y in range(output.shape()[2])
+                    ]
+                    for channel in range(output.shape()[1])
+                ]
+                for n in range(output.shape()[0])
+            ]
+            output.mul(probe).sum_all().backward()
+            results.append((output.data, x.grad, w.grad, bias.grad))
+        for left_group, right_group in zip(results[0], results[1]):
             for left, right in zip(
                 _flatten_nested(left_group), _flatten_nested(right_group)
             ):
-                self.assertAlmostEqual(left, right, places=12)
+                self.assertAlmostEqual(left, right, places=10)
+
+    def test_native_max_pool_matches_python_with_overlapping_windows(self):
+        values = [[[[1.0, 9.0, 3.0], [4.0, 9.0, 6.0], [7.0, 8.0, 5.0]]]]
+        outputs = []
+        gradients = []
+        for backend in ("python", "native"):
+            try:
+                set_backend(backend)
+            except RuntimeErrorUray as error:
+                if backend == "native":
+                    self.skipTest(str(error))
+                raise
+            value = GradTensor(values, True)
+            pooled = value.max_pool2d(2, 1)
+            outputs.append(pooled.data)
+            pooled.sum_all().backward()
+            gradients.append(value.grad)
+        self.assertEqual(outputs[0], outputs[1])
+        self.assertEqual(gradients[0], gradients[1])
+
+    def test_native_relu_matches_python_for_forward_and_backward(self):
+        values = [[[[2.0, -1.0], [-3.0, 4.0]]]]
+        outputs = []
+        gradients = []
+        for backend in ("python", "native"):
+            try:
+                set_backend(backend)
+            except RuntimeErrorUray as error:
+                if backend == "native":
+                    self.skipTest(str(error))
+                raise
+            value = GradTensor(values, True)
+            output = value.relu()
+            outputs.append(output.data)
+            output.sum_all().backward()
+            gradients.append(value.grad)
+        self.assertEqual(outputs[0], outputs[1])
+        self.assertEqual(gradients[0], gradients[1])
+
+    def test_native_cnn_training_does_not_select_numpy(self):
+        try:
+            set_backend("native")
+        except RuntimeErrorUray as error:
+            self.skipTest(str(error))
+        self.assertIsNone(get_numpy())
+        self.nn.members["rand_seed"].fn([19])
+        model = self.nn.members["sequential"].fn([[
+            self.nn.members["conv2d_layer"].fn([1, 2, 3, 1, 1]),
+            self.nn.members["activation_layer"].fn(["relu"]),
+            self.nn.members["max_pool2d_layer"].fn([2, 2]),
+            self.nn.members["flatten_layer"].fn([]),
+            self.nn.members["linear_layer"].fn([8, 2]),
+        ]])
+        X = [
+            [float(index) / 16.0 for index in range(16)],
+            [float(15 - index) / 16.0 for index in range(16)],
+        ]
+        Y = [[1.0, 0.0], [0.0, 1.0]]
+        history = self.nn.members["train_layers"].fn([
+            model, X, Y, 1, 0.001, 2, "cce", "adam", False, [1, 4, 4]
+        ])
+        self.assertEqual(len(history), 1)
+        self.assertTrue(math.isfinite(history[0]))
+        self.assertIsNone(get_numpy())
 
     def test_numpy_matmul_graph_matches_python_when_available(self):
         try:
@@ -501,19 +619,26 @@ class AutogradTests(unittest.TestCase):
         left = [[0.2, -0.4, 0.7], [0.5, 0.1, -0.3]]
         weight = [[0.1, 0.2, 0.3], [-0.5, 0.4, 0.8]]
         results = []
-        for backend in ("python", "numpy"):
+        try:
+            set_backend("native")
+        except RuntimeErrorUray as error:
+            self.skipTest(str(error))
+        for backend in ("python", "numpy", "native"):
             set_backend(backend)
             x = GradTensor(left, True)
             w = GradTensor(weight, True)
             loss = x.matmul(w.transpose()).mean()
             loss.backward()
             results.append((loss.item(), x.grad, w.grad))
-        self.assertAlmostEqual(results[0][0], results[1][0], places=12)
-        for left_group, right_group in zip(results[0][1:], results[1][1:]):
-            for left_value, right_value in zip(
-                _flatten_nested(left_group), _flatten_nested(right_group)
+        for candidate in (1, 2):
+            self.assertAlmostEqual(results[0][0], results[candidate][0], places=12)
+            for left_group, right_group in zip(
+                results[0][1:], results[candidate][1:]
             ):
-                self.assertAlmostEqual(left_value, right_value, places=12)
+                for left_value, right_value in zip(
+                    _flatten_nested(left_group), _flatten_nested(right_group)
+                ):
+                    self.assertAlmostEqual(left_value, right_value, places=12)
 
 
 if __name__ == "__main__":

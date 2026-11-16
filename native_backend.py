@@ -3,6 +3,7 @@
 import array
 import ctypes
 import hashlib
+from itertools import chain
 import math
 import os
 from pathlib import Path
@@ -150,6 +151,62 @@ def _as_matrix(data, name):
             converted.append(number)
         rows.append(converted)
     return rows
+
+
+def _flat_array(data, name):
+    result = array.array("d")
+
+    def append_values(value):
+        if isinstance(value, (list, tuple)):
+            for item in value:
+                append_values(item)
+            return
+        try:
+            number = float(value)
+        except (TypeError, ValueError, OverflowError) as error:
+            raise RuntimeErrorUray(f"{name}: элементы должны быть числами") from error
+        if not math.isfinite(number):
+            raise RuntimeErrorUray(f"{name}: элементы должны быть конечными")
+        result.append(number)
+
+    append_values(data)
+    return result
+
+
+def _nested_from_flat(values, shape):
+    if len(shape) == 4:
+        iterator = iter(values)
+        batches, channels, height, width = shape
+        return [
+            [
+                [
+                    [next(iterator) for _ in range(width)]
+                    for _ in range(height)
+                ]
+                for _ in range(channels)
+            ]
+            for _ in range(batches)
+        ]
+
+    def build(offset, dimensions):
+        if not dimensions:
+            return values[offset]
+        width = math.prod(dimensions[1:]) if len(dimensions) > 1 else 1
+        return [
+            build(offset + index * width, dimensions[1:])
+            for index in range(dimensions[0])
+        ]
+
+    return build(0, shape)
+
+
+def _flat_4d_array(data):
+    return array.array(
+        "d",
+        chain.from_iterable(
+            chain.from_iterable(chain.from_iterable(data))
+        ),
+    )
 
 
 def _dataset_buffers(x_data, y_data, sample_count):
@@ -391,6 +448,36 @@ class NativeBackend:
             ctypes.c_int, _SIZE_T, _VOID_P, _DOUBLE_P,
         ]
         self.library.uray_mlp_evaluate.restype = ctypes.c_int
+        self.library.uray_conv2d_forward.argtypes = [
+            _SIZE_T, _SIZE_T, _SIZE_T, _SIZE_T,
+            _SIZE_T, _SIZE_T, _SIZE_T, _SIZE_T, _SIZE_T,
+            _VOID_P, _VOID_P, _VOID_P, _VOID_P, _VOID_P, _VOID_P,
+        ]
+        self.library.uray_conv2d_forward.restype = ctypes.c_int
+        self.library.uray_conv2d_backward.argtypes = [
+            _SIZE_T, _SIZE_T, _SIZE_T, _SIZE_T,
+            _SIZE_T, _SIZE_T, _SIZE_T, _SIZE_T, _SIZE_T,
+            _VOID_P, _VOID_P, _VOID_P, _VOID_P, _VOID_P, _VOID_P,
+        ]
+        self.library.uray_conv2d_backward.restype = ctypes.c_int
+        self.library.uray_max_pool2d_forward.argtypes = [
+            _SIZE_T, _SIZE_T, _SIZE_T, _SIZE_T, _SIZE_T, _SIZE_T,
+            _VOID_P, _VOID_P, _SIZE_T_P,
+        ]
+        self.library.uray_max_pool2d_forward.restype = ctypes.c_int
+        self.library.uray_max_pool2d_backward.argtypes = [
+            _SIZE_T, _SIZE_T, _SIZE_T, _SIZE_T, _SIZE_T, _SIZE_T,
+            _VOID_P, _SIZE_T_P, _VOID_P,
+        ]
+        self.library.uray_max_pool2d_backward.restype = ctypes.c_int
+        self.library.uray_relu_forward.argtypes = [
+            _SIZE_T, _VOID_P, _VOID_P,
+        ]
+        self.library.uray_relu_forward.restype = None
+        self.library.uray_relu_backward.argtypes = [
+            _SIZE_T, _VOID_P, _VOID_P, _VOID_P,
+        ]
+        self.library.uray_relu_backward.restype = None
 
     def matmul(self, left, right):
         left_rows = _as_matrix(left, "matmul")
@@ -409,6 +496,208 @@ class NativeBackend:
 
     def create_mlp_trainer(self, model, x_data, y_data, count, optimizer):
         return NativeMLPTrainer(self, model, x_data, y_data, count, optimizer)
+
+    def conv2d_forward(self, x_data, weight_data, bias_data, stride, padding):
+        from tensor import Tensor
+
+        x_shape = Tensor._shape_list(x_data)
+        weight_shape = Tensor._shape_list(weight_data)
+        if len(x_shape) != 4 or len(weight_shape) != 4:
+            raise RuntimeErrorUray("Нативная conv2d ожидает NCHW-вход и OIHW-веса")
+        batches, in_channels, height, width = x_shape
+        out_channels, weight_channels, kernel_h, kernel_w = weight_shape
+        if in_channels != weight_channels:
+            raise RuntimeErrorUray("conv2d: число каналов не совпадает")
+        out_h = (height + 2 * padding - kernel_h) // stride + 1
+        out_w = (width + 2 * padding - kernel_w) // stride + 1
+        if out_h <= 0 or out_w <= 0:
+            raise RuntimeErrorUray("conv2d: ядро больше входа")
+        input_values = _flat_4d_array(x_data)
+        weight_values = _flat_4d_array(weight_data)
+        bias_values = _flat_array(bias_data, "conv2d bias") if bias_data is not None else None
+        im2col = array.array(
+            "d", [0.0]
+        ) * (batches * out_h * out_w * in_channels * kernel_h * kernel_w)
+        weights_col = array.array(
+            "d", [0.0]
+        ) * (in_channels * kernel_h * kernel_w * out_channels)
+        output_values = array.array(
+            "d", [0.0]
+        ) * (batches * out_channels * out_h * out_w)
+        input_pointer, input_ref = _array_pointer(input_values, ctypes.c_double)
+        weight_pointer, weight_ref = _array_pointer(weight_values, ctypes.c_double)
+        bias_pointer, bias_ref = (
+            _array_pointer(bias_values, ctypes.c_double)
+            if bias_values is not None else (_VOID_P(), None)
+        )
+        output_pointer, output_ref = _array_pointer(output_values, ctypes.c_double)
+        im2col_pointer, im2col_ref = _array_pointer(im2col, ctypes.c_double)
+        weights_col_pointer, weights_col_ref = _array_pointer(
+            weights_col, ctypes.c_double
+        )
+        status = self.library.uray_conv2d_forward(
+            batches, in_channels, height, width,
+            out_channels, kernel_h, kernel_w, stride, padding,
+            input_pointer, weight_pointer, bias_pointer, output_pointer,
+            im2col_pointer, weights_col_pointer,
+        )
+        if status:
+            raise RuntimeErrorUray(
+                f"Нативная conv2d завершилась с кодом ошибки {status}"
+            )
+        context = {
+            "shape": (batches, in_channels, height, width),
+            "weight_shape": (out_channels, in_channels, kernel_h, kernel_w),
+            "stride": stride,
+            "padding": padding,
+            "im2col": im2col,
+            "weights_col": weights_col,
+        }
+        return (
+            _nested_from_flat(output_values, [batches, out_channels, out_h, out_w]),
+            context,
+        )
+
+    def conv2d_backward(self, context, grad_output, include_bias):
+        batches, in_channels, height, width = context["shape"]
+        out_channels, _, kernel_h, kernel_w = context["weight_shape"]
+        stride = context["stride"]
+        padding = context["padding"]
+        out_h = (height + 2 * padding - kernel_h) // stride + 1
+        out_w = (width + 2 * padding - kernel_w) // stride + 1
+        grad_values = _flat_4d_array(grad_output)
+        grad_input = array.array("d", [0.0]) * (
+            batches * in_channels * height * width
+        )
+        grad_weights = array.array("d", [0.0]) * (
+            out_channels * in_channels * kernel_h * kernel_w
+        )
+        grad_bias = array.array("d", [0.0]) * out_channels
+        grad_pointer, grad_ref = _array_pointer(grad_values, ctypes.c_double)
+        im2col_pointer, im2col_ref = _array_pointer(
+            context["im2col"], ctypes.c_double
+        )
+        weights_col_pointer, weights_col_ref = _array_pointer(
+            context["weights_col"], ctypes.c_double
+        )
+        input_pointer, input_ref = _array_pointer(grad_input, ctypes.c_double)
+        weights_pointer, weights_ref = _array_pointer(grad_weights, ctypes.c_double)
+        bias_pointer, bias_ref = _array_pointer(grad_bias, ctypes.c_double)
+        status = self.library.uray_conv2d_backward(
+            batches, in_channels, height, width,
+            out_channels, kernel_h, kernel_w, stride, padding,
+            grad_pointer, im2col_pointer, weights_col_pointer,
+            input_pointer, weights_pointer, bias_pointer,
+        )
+        if status:
+            raise RuntimeErrorUray(
+                f"Обратный проход conv2d завершился с кодом ошибки {status}"
+            )
+        input_gradient = _nested_from_flat(
+            grad_input, [batches, in_channels, height, width]
+        )
+        weight_gradient = _nested_from_flat(
+            grad_weights, [out_channels, in_channels, kernel_h, kernel_w]
+        )
+        result = (input_gradient, weight_gradient)
+        if include_bias:
+            result += (list(grad_bias),)
+        return result
+
+    def max_pool2d_forward(self, x_data, kernel, stride):
+        from tensor import Tensor
+
+        shape = Tensor._shape_list(x_data)
+        if len(shape) != 4:
+            raise RuntimeErrorUray("Нативный max_pool2d ожидает NCHW-вход")
+        batches, channels, height, width = shape
+        out_h = (height - kernel) // stride + 1
+        out_w = (width - kernel) // stride + 1
+        if out_h <= 0 or out_w <= 0:
+            raise RuntimeErrorUray("max_pool2d: окно больше входа")
+        input_values = _flat_4d_array(x_data)
+        output_values = array.array(
+            "d", [0.0]
+        ) * (batches * channels * out_h * out_w)
+        indices = (ctypes.c_size_t * len(output_values))()
+        input_pointer, input_ref = _array_pointer(input_values, ctypes.c_double)
+        output_pointer, output_ref = _array_pointer(output_values, ctypes.c_double)
+        status = self.library.uray_max_pool2d_forward(
+            batches, channels, height, width, kernel, stride,
+            input_pointer, output_pointer, indices,
+        )
+        if status:
+            raise RuntimeErrorUray(
+                f"Нативный max_pool2d завершился с кодом ошибки {status}"
+            )
+        context = {
+            "shape": shape,
+            "kernel": kernel,
+            "stride": stride,
+            "indices": indices,
+        }
+        return (
+            _nested_from_flat(
+                output_values, [batches, channels, out_h, out_w]
+            ),
+            context,
+        )
+
+    def max_pool2d_backward(self, context, grad_output):
+        batches, channels, height, width = context["shape"]
+        kernel = context["kernel"]
+        stride = context["stride"]
+        grad_values = _flat_4d_array(grad_output)
+        grad_input = array.array(
+            "d", [0.0]
+        ) * (batches * channels * height * width)
+        grad_pointer, grad_ref = _array_pointer(grad_values, ctypes.c_double)
+        input_pointer, input_ref = _array_pointer(grad_input, ctypes.c_double)
+        status = self.library.uray_max_pool2d_backward(
+            batches, channels, height, width, kernel, stride,
+            grad_pointer, context["indices"], input_pointer,
+        )
+        if status:
+            raise RuntimeErrorUray(
+                f"Обратный проход max_pool2d завершился с кодом ошибки {status}"
+            )
+        return _nested_from_flat(
+            grad_input, [batches, channels, height, width]
+        )
+
+    def relu_forward(self, data):
+        from tensor import Tensor
+
+        shape = Tensor._shape_list(data)
+        values = (
+            _flat_4d_array(data)
+            if len(shape) == 4 else _flat_array(data, "ReLU input")
+        )
+        output = array.array("d", [0.0]) * len(values)
+        input_pointer, input_ref = _array_pointer(values, ctypes.c_double)
+        output_pointer, output_ref = _array_pointer(output, ctypes.c_double)
+        self.library.uray_relu_forward(len(values), input_pointer, output_pointer)
+        context = {"shape": shape, "input": values}
+        return _nested_from_flat(output, shape), context
+
+    def relu_backward(self, context, grad_output):
+        shape = context["shape"]
+        values = (
+            _flat_4d_array(grad_output)
+            if len(shape) == 4 else _flat_array(grad_output, "ReLU gradient")
+        )
+        if len(values) != len(context["input"]):
+            raise RuntimeErrorUray("ReLU: градиент имеет неверный размер")
+        output = array.array("d", [0.0]) * len(values)
+        input_pointer, input_ref = _array_pointer(
+            context["input"], ctypes.c_double
+        )
+        grad_pointer, grad_ref = _array_pointer(values, ctypes.c_double)
+        output_pointer, output_ref = _array_pointer(output, ctypes.c_double)
+        self.library.uray_relu_backward(
+            len(values), input_pointer, grad_pointer, output_pointer
+        )
+        return _nested_from_flat(output, shape)
 
     def _predict_or_evaluate(
         self, model, x_data, y_data, loss_name, batch_size, return_predictions

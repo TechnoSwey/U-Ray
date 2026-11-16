@@ -9,7 +9,7 @@ than a trainer that knows one particular architecture.
 import math
 
 from errors import RuntimeErrorUray
-from tensor import Tensor, get_numpy
+from tensor import Tensor, get_native, get_numpy
 
 
 def _shape(value):
@@ -206,6 +206,21 @@ def _matmul(left, right):
             return result.item() if result.ndim == 0 else result.tolist()
         except (TypeError, ValueError) as error:
             raise RuntimeErrorUray(f"matmul: {error}") from error
+    native = get_native()
+    if native is not None:
+        left_matrix = [left] if len(left_shape) == 1 else left
+        right_matrix = (
+            [[value] for value in right]
+            if len(right_shape) == 1 else right
+        )
+        result = native.matmul(left_matrix, right_matrix)
+        if len(left_shape) == 1 and len(right_shape) == 1:
+            return result[0][0]
+        if len(right_shape) == 1:
+            return [row[0] for row in result]
+        if len(left_shape) == 1:
+            return result[0]
+        return result
     if len(left_shape) == 1 and len(right_shape) == 1:
         return sum(a * b for a, b in zip(left, right))
     if len(left_shape) == 2 and len(right_shape) == 1:
@@ -266,6 +281,16 @@ class GradTensor(Tensor):
             parents,
             backward_fn,
         )
+
+    def _result_owned(self, data, parents, backward_fn):
+        result = GradTensor.__new__(GradTensor)
+        result._data = data
+        result.requires_grad = any(parent.requires_grad for parent in parents)
+        result.grad = None
+        result._parents = tuple(parents)
+        result._backward_fn = backward_fn
+        result._graph_consumed = False
+        return result
 
     def add(self, other):
         other = as_grad_tensor(other)
@@ -531,9 +556,14 @@ class GradTensor(Tensor):
 
     def relu(self):
         np = get_numpy()
+        native = get_native()
+        owns_output = False
         if np is not None:
             array = np.asarray(self.data, dtype=float)
             output = _array_to_data(np.maximum(array, 0.0))
+        elif native is not None:
+            output, context = native.relu_forward(self.data)
+            owns_output = True
         else:
             array = None
             output = _map(self.data, lambda x: max(0.0, x))
@@ -541,6 +571,8 @@ class GradTensor(Tensor):
         def backward(grad):
             if np is not None:
                 return (_array_to_data(np.asarray(grad) * (array > 0.0)),)
+            if native is not None:
+                return (native.relu_backward(context, grad),)
             return (
                 _zip_map(
                     grad,
@@ -549,11 +581,9 @@ class GradTensor(Tensor):
                 ),
             )
 
-        return self._result(
-            output,
-            (self,),
-            backward,
-        )
+        if owns_output:
+            return self._result_owned(output, (self,), backward)
+        return self._result(output, (self,), backward)
 
     def sigmoid(self):
         np = get_numpy()
@@ -830,6 +860,8 @@ class GradTensor(Tensor):
             raise RuntimeErrorUray("conv2d: bias должен иметь форму [out_channels]")
 
         np = get_numpy()
+        native = get_native()
+        owns_output = False
         if np is not None:
             x_array = np.asarray(x_data, dtype=float)
             w_array = np.asarray(weight.data, dtype=float)
@@ -871,6 +903,25 @@ class GradTensor(Tensor):
                 if bias_tensor is not None:
                     grad_values.append(grad_array.sum(axis=(0, 2, 3)).tolist())
                 return tuple(grad_values)
+        elif native is not None:
+            output_data, context = native.conv2d_forward(
+                x_data,
+                weight.data,
+                bias_tensor.data if bias_tensor is not None else None,
+                stride,
+                padding,
+            )
+            owns_output = True
+
+            def backward(grad):
+                grad_batches = [grad] if squeeze_batch else grad
+                values = native.conv2d_backward(
+                    context, grad_batches, bias_tensor is not None
+                )
+                grad_input = values[0]
+                if squeeze_batch:
+                    grad_input = grad_input[0]
+                return (grad_input,) + values[1:]
         else:
             padded = [
                 [
@@ -939,6 +990,8 @@ class GradTensor(Tensor):
                 return tuple(result)
         if squeeze_batch:
             output_data = output_data[0]
+        if owns_output:
+            return self._result_owned(output_data, parents, backward)
         return self._result(output_data, parents, backward)
 
     def max_pool2d(self, kernel_size=2, stride=None):
@@ -964,6 +1017,8 @@ class GradTensor(Tensor):
         if out_h <= 0 or out_w <= 0:
             raise RuntimeErrorUray("max_pool2d: окно больше входного изображения")
         np = get_numpy()
+        native = get_native()
+        owns_output = False
         if np is not None:
             array = np.asarray(x_data, dtype=float)
             windows = np.lib.stride_tricks.sliding_window_view(
@@ -982,6 +1037,16 @@ class GradTensor(Tensor):
                 cols = wi * stride + indices % kernel_size
                 np.add.at(grad_input, (ni, ci, rows, cols), grad_array)
                 return (grad_input[0].tolist() if squeeze_batch else grad_input.tolist(),)
+        elif native is not None:
+            output_data, context = native.max_pool2d_forward(
+                x_data, kernel_size, stride
+            )
+            owns_output = True
+
+            def backward(grad):
+                grad_batches = [grad] if squeeze_batch else grad
+                grad_input = native.max_pool2d_backward(context, grad_batches)
+                return (grad_input[0] if squeeze_batch else grad_input,)
         else:
             output_data = [
                 [
@@ -1026,6 +1091,8 @@ class GradTensor(Tensor):
                 return (grad_input[0] if squeeze_batch else grad_input,)
         if squeeze_batch:
             output_data = output_data[0]
+        if owns_output:
+            return self._result_owned(output_data, (self,), backward)
         return self._result(output_data, (self,), backward)
 
     def batch_norm(

@@ -61,7 +61,7 @@ python3 main.py examples/save_load.ur
 ./uray --repl
 ./uray examples/numpy_backend.ur --backend=numpy
 ./uray examples/mnist.ur --backend=native
-./uray examples/mnist_cnn.ur --backend=numpy
+./uray examples/mnist_cnn.ur --backend=native
 ./uray examples/tabular_classification.ur
 ./uray check examples/mlp_xor.ur
 ./uray fmt examples/mlp_xor.ur
@@ -70,12 +70,12 @@ python3 main.py examples/save_load.ur
 
 Без имени файла `uray` тоже открывает REPL. Стандартный `python` backend не
 требует сторонних библиотек. `--backend=native` использует встроенные C-ядра
-для обучения, оценки и предсказания обычных MLP, не импортирует NumPy и не
-зависит от сторонних ML-библиотек. При первом запуске он собирает исходник
-ядра системным C-компилятором (`cc`, `clang` или `gcc`) и кэширует его во
-временном каталоге; на Windows нативная сборка пока не поддерживается.
-`--backend=numpy` остаётся дополнительным вариантом для NumPy-ускорения и
-компонуемых CNN/autodiff-примеров. `nn.load_mnist("data/mnist", true)` скачивает
+для обучения, оценки и предсказания MLP, а также `matmul`, Conv2D, ReLU и
+max-pooling в CNN/autodiff-моделях. Он не импортирует NumPy и не зависит
+от сторонних ML-библиотек. При первом запуске ядро собирается системным C-компилятором
+(`cc`, `clang` или `gcc`) и кэшируется во временном каталоге; на Windows
+нативная сборка пока не поддерживается. `--backend=numpy` остаётся
+необязательным вариантом. `nn.load_mnist("data/mnist", true)` скачивает
 недостающие стандартные архивы, проверяет IDX-структуру и возвращает train/test
 без разворачивания всех изображений в Python-списки. `nn.load_csv(...)`
 загружает числовые признаки из CSV, воспроизводимо делит данные на train/test,
@@ -148,7 +148,7 @@ print("accuracy:", metrics[1])
 | [`save_load.ur`](examples/save_load.ur) | Обучение XOR, сохранение модели в JSON и загрузка для предсказаний |
 | [`train_batch_example.ur`](examples/train_batch_example.ur) | Синтетические данные, MLP и пакетное обучение с Adam |
 | [`mnist.ur`](examples/mnist.ur) | Загружает полный MNIST, обучает классификатор, оценивает его и сохраняет модель |
-| [`mnist_cnn.ur`](examples/mnist_cnn.ur) | Обучает сверточную модель через общий autodiff и сохраняет её |
+| [`mnist_cnn.ur`](examples/mnist_cnn.ur) | Обучает CNN через общий autodiff и встроенные native-ядра без NumPy |
 | [`tabular_classification.ur`](examples/tabular_classification.ur) | Загружает CSV и обучает классификатор с train/test оценкой |
 | [`residual_regularization.ur`](examples/residual_regularization.ur) | Показывает BatchNorm, Dropout и обучаемую residual-ветвь |
 | [`transformer_sequence.ur`](examples/transformer_sequence.ur) | Обучает Transformer-блок с multi-head causal self-attention |

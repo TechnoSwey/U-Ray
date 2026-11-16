@@ -9,7 +9,7 @@
 | [`save_load.ur`](save_load.ur) | Обучает XOR, сохраняет модель в JSON и загружает её для предсказаний | `./uray examples/save_load.ur` |
 | [`train_batch_example.ur`](train_batch_example.ur) | Создаёт синтетические данные, обучает MLP батчами с Adam и выводит метрики | `./uray examples/train_batch_example.ur` |
 | [`mnist.ur`](mnist.ur) | Загружает исходные IDX-архивы, обучает MLP-классификатор цифр без NumPy, оценивает его и сохраняет модель | `python3 examples/download_mnist.py && ./uray examples/mnist.ur --backend=native` |
-| [`mnist_cnn.ur`](mnist_cnn.ur) | Обучает сверточную MNIST-модель на компонуемых слоях и autodiff | `python3 examples/download_mnist.py && ./uray examples/mnist_cnn.ur --backend=numpy` |
+| [`mnist_cnn.ur`](mnist_cnn.ur) | Обучает сверточную MNIST-модель с native Conv2D, pooling и dense-слоями без NumPy | `python3 examples/download_mnist.py && ./uray examples/mnist_cnn.ur --backend=native` |
 | [`tabular_classification.ur`](tabular_classification.ur) | Читает CSV, делит данные на train/test, нормализует признаки и обучает классификатор | `./uray examples/tabular_classification.ur` |
 | [`residual_regularization.ur`](residual_regularization.ur) | Обучает классификатор с BatchNorm, Dropout и residual-ветвью | `./uray examples/residual_regularization.ur` |
 | [`transformer_sequence.ur`](transformer_sequence.ur) | Обучает последовательностную модель с Transformer-блоком и causal attention | `./uray examples/transformer_sequence.ur` |

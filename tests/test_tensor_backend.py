@@ -82,6 +82,27 @@ class TensorBackendTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_native_cnn_cli_runs_without_numpy(self):
+        project_root = Path(__file__).resolve().parents[1]
+        script_path = project_root / "tests" / "autograd_cnn_trainer.ur"
+        script = (
+            "import sys; from main import main; "
+            f"status = main([{str(script_path)!r}, '--backend=native']); "
+            "assert status == 0; "
+            "assert 'numpy' not in sys.modules"
+        )
+        result = subprocess.run(
+            [sys.executable, "-S", "-c", script],
+            cwd=project_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("CNN training history: true", result.stdout)
+        self.assertIn("CNN evaluation: true", result.stdout)
+        self.assertIn("CNN predictions: true", result.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

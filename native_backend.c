@@ -764,3 +764,401 @@ int uray_mlp_evaluate(
     free(targets);
     return 0;
 }
+
+static int checked_product(size_t a, size_t b, size_t *result) {
+    if (a != 0 && b > SIZE_MAX / a) return 0;
+    *result = a * b;
+    return 1;
+}
+
+static int conv2d_dimensions(
+    size_t batches, size_t in_channels, size_t height, size_t width,
+    size_t out_channels, size_t kernel_h, size_t kernel_w,
+    size_t stride, size_t padding, size_t *out_h, size_t *out_w,
+    size_t *rows, size_t *reduction
+) {
+    if (batches == 0 || in_channels == 0 || height == 0 || width == 0 ||
+        out_channels == 0 || kernel_h == 0 || kernel_w == 0 || stride == 0 ||
+        padding > (SIZE_MAX - height) / 2 ||
+        padding > (SIZE_MAX - width) / 2) {
+        return 0;
+    }
+    size_t padded_h = height + 2 * padding;
+    size_t padded_w = width + 2 * padding;
+    if (kernel_h > padded_h || kernel_w > padded_w) return 0;
+    *out_h = (padded_h - kernel_h) / stride + 1;
+    *out_w = (padded_w - kernel_w) / stride + 1;
+    size_t spatial, kernel_size;
+    if (!checked_product(*out_h, *out_w, &spatial) ||
+        !checked_product(batches, spatial, rows) ||
+        !checked_product(in_channels, kernel_h, &kernel_size) ||
+        !checked_product(kernel_size, kernel_w, reduction)) {
+        return 0;
+    }
+    size_t im2col_count, weights_col_count;
+    size_t input_count, output_count, weight_count;
+    return checked_product(*rows, *reduction, &im2col_count) &&
+        checked_product(*reduction, out_channels, &weights_col_count) &&
+        checked_product(batches, in_channels, &input_count) &&
+        checked_product(input_count, height, &input_count) &&
+        checked_product(input_count, width, &input_count) &&
+        checked_product(batches, out_channels, &output_count) &&
+        checked_product(output_count, *out_h, &output_count) &&
+        checked_product(output_count, *out_w, &output_count) &&
+        checked_product(out_channels, *reduction, &weight_count) &&
+        im2col_count <= SIZE_MAX / sizeof(double) &&
+        weights_col_count <= SIZE_MAX / sizeof(double) &&
+        input_count <= SIZE_MAX / sizeof(double) &&
+        output_count <= SIZE_MAX / sizeof(double) &&
+        weight_count <= SIZE_MAX / sizeof(double);
+}
+
+int uray_conv2d_forward(
+    size_t batches, size_t in_channels, size_t height, size_t width,
+    size_t out_channels, size_t kernel_h, size_t kernel_w,
+    size_t stride, size_t padding,
+    const double *input, const double *weights, const double *bias,
+    double *output_nchw, double *im2col, double *weights_col
+) {
+    size_t out_h, out_w, rows, reduction;
+    if (!conv2d_dimensions(
+            batches, in_channels, height, width, out_channels,
+            kernel_h, kernel_w, stride, padding,
+            &out_h, &out_w, &rows, &reduction) ||
+        input == NULL || weights == NULL || output_nchw == NULL ||
+        im2col == NULL || weights_col == NULL) {
+        return 1;
+    }
+
+    for (size_t row = 0; row < rows; ++row) {
+        size_t batch = row / (out_h * out_w);
+        size_t position = row % (out_h * out_w);
+        size_t out_y = position / out_w;
+        size_t out_x = position % out_w;
+        size_t column = 0;
+        for (size_t channel = 0; channel < in_channels; ++channel) {
+            for (size_t ky = 0; ky < kernel_h; ++ky) {
+                size_t in_y = out_y * stride + ky;
+                for (size_t kx = 0; kx < kernel_w; ++kx, ++column) {
+                    size_t in_x = out_x * stride + kx;
+                    if (in_y < padding || in_x < padding ||
+                        in_y - padding >= height ||
+                        in_x - padding >= width) {
+                        im2col[row * reduction + column] = 0.0;
+                    } else {
+                        size_t input_index =
+                            ((batch * in_channels + channel) * height +
+                             (in_y - padding)) * width + (in_x - padding);
+                        im2col[row * reduction + column] = input[input_index];
+                    }
+                }
+            }
+        }
+    }
+
+    for (size_t channel = 0; channel < in_channels; ++channel) {
+        for (size_t ky = 0; ky < kernel_h; ++ky) {
+            for (size_t kx = 0; kx < kernel_w; ++kx) {
+                size_t column =
+                    (channel * kernel_h + ky) * kernel_w + kx;
+                for (size_t out = 0; out < out_channels; ++out) {
+                    size_t weight_index =
+                        ((out * in_channels + channel) * kernel_h + ky) *
+                            kernel_w + kx;
+                    weights_col[column * out_channels + out] =
+                        weights[weight_index];
+                }
+            }
+        }
+    }
+
+    size_t matrix_size;
+    if (!checked_product(rows, out_channels, &matrix_size) ||
+        matrix_size > SIZE_MAX / sizeof(double)) {
+        return 1;
+    }
+    double *matrix = (double *)malloc(matrix_size * sizeof(double));
+    if (matrix == NULL) return 2;
+    uray_matmul(rows, reduction, out_channels, im2col, weights_col, matrix);
+    for (size_t row = 0; row < rows; ++row) {
+        size_t batch = row / (out_h * out_w);
+        size_t position = row % (out_h * out_w);
+        size_t out_y = position / out_w;
+        size_t out_x = position % out_w;
+        for (size_t out = 0; out < out_channels; ++out) {
+            double value = matrix[row * out_channels + out];
+            if (bias != NULL) value += bias[out];
+            size_t output_index =
+                ((batch * out_channels + out) * out_h + out_y) * out_w + out_x;
+            output_nchw[output_index] = value;
+        }
+    }
+    free(matrix);
+    return 0;
+}
+
+int uray_conv2d_backward(
+    size_t batches, size_t in_channels, size_t height, size_t width,
+    size_t out_channels, size_t kernel_h, size_t kernel_w,
+    size_t stride, size_t padding,
+    const double *grad_nchw, const double *im2col, const double *weights_col,
+    double *grad_input, double *grad_weights, double *grad_bias
+) {
+    size_t out_h, out_w, rows, reduction;
+    if (!conv2d_dimensions(
+            batches, in_channels, height, width, out_channels,
+            kernel_h, kernel_w, stride, padding,
+            &out_h, &out_w, &rows, &reduction) ||
+        grad_nchw == NULL || im2col == NULL || weights_col == NULL ||
+        grad_input == NULL || grad_weights == NULL || grad_bias == NULL) {
+        return 1;
+    }
+
+    size_t grad_size, transposed_size, input_size, weight_size;
+    if (!checked_product(rows, out_channels, &grad_size) ||
+        !checked_product(out_channels, rows, &transposed_size) ||
+        !checked_product(batches, in_channels, &input_size) ||
+        !checked_product(input_size, height, &input_size) ||
+        !checked_product(input_size, width, &input_size) ||
+        !checked_product(out_channels, reduction, &weight_size) ||
+        grad_size > SIZE_MAX / sizeof(double) ||
+        transposed_size > SIZE_MAX / sizeof(double) ||
+        input_size > SIZE_MAX / sizeof(double) ||
+        weight_size > SIZE_MAX / sizeof(double) ||
+        rows > SIZE_MAX / reduction ||
+        rows * reduction > SIZE_MAX / sizeof(double)) {
+        return 1;
+    }
+
+    double *grad_rows = (double *)malloc(grad_size * sizeof(double));
+    double *grad_transposed =
+        (double *)malloc(transposed_size * sizeof(double));
+    double *weights_transposed =
+        (double *)malloc(weight_size * sizeof(double));
+    double *weight_rows = (double *)malloc(weight_size * sizeof(double));
+    double *grad_columns =
+        (double *)malloc(rows * reduction * sizeof(double));
+    if (grad_rows == NULL || grad_transposed == NULL ||
+        weights_transposed == NULL || weight_rows == NULL ||
+        grad_columns == NULL) {
+        free(grad_rows);
+        free(grad_transposed);
+        free(weights_transposed);
+        free(weight_rows);
+        free(grad_columns);
+        return 2;
+    }
+
+    memset(grad_input, 0, input_size * sizeof(double));
+    memset(grad_weights, 0, weight_size * sizeof(double));
+    memset(grad_bias, 0, out_channels * sizeof(double));
+    memset(grad_transposed, 0, transposed_size * sizeof(double));
+    size_t spatial = out_h * out_w;
+    for (size_t row = 0; row < rows; ++row) {
+        size_t batch = row / spatial;
+        size_t position = row % spatial;
+        size_t out_y = position / out_w;
+        size_t out_x = position % out_w;
+        for (size_t out = 0; out < out_channels; ++out) {
+            size_t nchw_index =
+                ((batch * out_channels + out) * out_h + out_y) * out_w + out_x;
+            double value = grad_nchw[nchw_index];
+            grad_rows[row * out_channels + out] = value;
+            grad_transposed[out * rows + row] = value;
+            grad_bias[out] += value;
+        }
+    }
+
+    for (size_t column = 0; column < reduction; ++column) {
+        for (size_t out = 0; out < out_channels; ++out) {
+            weights_transposed[out * reduction + column] =
+                weights_col[column * out_channels + out];
+        }
+    }
+    uray_matmul(
+        out_channels, rows, reduction,
+        grad_transposed, im2col, weight_rows
+    );
+    uray_matmul(
+        rows, out_channels, reduction,
+        grad_rows, weights_transposed, grad_columns
+    );
+
+    for (size_t out = 0; out < out_channels; ++out) {
+        for (size_t column = 0; column < reduction; ++column) {
+            size_t channel = column / (kernel_h * kernel_w);
+            size_t kernel_offset = column % (kernel_h * kernel_w);
+            size_t ky = kernel_offset / kernel_w;
+            size_t kx = kernel_offset % kernel_w;
+            size_t weight_index =
+                ((out * in_channels + channel) * kernel_h + ky) *
+                    kernel_w + kx;
+            grad_weights[weight_index] =
+                weight_rows[out * reduction + column];
+        }
+    }
+
+    for (size_t row = 0; row < rows; ++row) {
+        size_t batch = row / spatial;
+        size_t position = row % spatial;
+        size_t out_y = position / out_w;
+        size_t out_x = position % out_w;
+        size_t column = 0;
+        for (size_t channel = 0; channel < in_channels; ++channel) {
+            for (size_t ky = 0; ky < kernel_h; ++ky) {
+                size_t in_y = out_y * stride + ky;
+                for (size_t kx = 0; kx < kernel_w; ++kx, ++column) {
+                    size_t in_x = out_x * stride + kx;
+                    if (in_y < padding || in_x < padding ||
+                        in_y - padding >= height ||
+                        in_x - padding >= width) {
+                        continue;
+                    }
+                    size_t input_index =
+                        ((batch * in_channels + channel) * height +
+                         (in_y - padding)) * width + (in_x - padding);
+                    grad_input[input_index] +=
+                        grad_columns[row * reduction + column];
+                }
+            }
+        }
+    }
+
+    free(grad_rows);
+    free(grad_transposed);
+    free(weights_transposed);
+    free(weight_rows);
+    free(grad_columns);
+    return 0;
+}
+
+int uray_max_pool2d_forward(
+    size_t batches, size_t channels, size_t height, size_t width,
+    size_t kernel, size_t stride, const double *input, double *output,
+    size_t *indices
+) {
+    if (batches == 0 || channels == 0 || height == 0 || width == 0 ||
+        kernel == 0 || stride == 0 || kernel > height || kernel > width ||
+        input == NULL || output == NULL || indices == NULL) {
+        return 1;
+    }
+    size_t out_h = (height - kernel) / stride + 1;
+    size_t out_w = (width - kernel) / stride + 1;
+    size_t input_count, output_count;
+    if (!checked_product(batches, channels, &input_count) ||
+        !checked_product(input_count, height, &input_count) ||
+        !checked_product(input_count, width, &input_count) ||
+        !checked_product(batches, channels, &output_count) ||
+        !checked_product(output_count, out_h, &output_count) ||
+        !checked_product(output_count, out_w, &output_count) ||
+        input_count > SIZE_MAX / sizeof(double) ||
+        output_count > SIZE_MAX / sizeof(double) ||
+        output_count > SIZE_MAX / sizeof(size_t) ||
+        kernel > SIZE_MAX / kernel) {
+        return 1;
+    }
+    for (size_t batch = 0; batch < batches; ++batch) {
+        for (size_t channel = 0; channel < channels; ++channel) {
+            for (size_t out_y = 0; out_y < out_h; ++out_y) {
+                for (size_t out_x = 0; out_x < out_w; ++out_x) {
+                    size_t best_index = 0;
+                    size_t in_y = out_y * stride;
+                    size_t in_x = out_x * stride;
+                    double best = input[
+                        ((batch * channels + channel) * height + in_y) *
+                            width + in_x
+                    ];
+                    for (size_t ky = 0; ky < kernel; ++ky) {
+                        for (size_t kx = 0; kx < kernel; ++kx) {
+                            size_t index = ky * kernel + kx;
+                            double value = input[
+                                ((batch * channels + channel) * height +
+                                 in_y + ky) * width + in_x + kx
+                            ];
+                            if (value > best) {
+                                best = value;
+                                best_index = index;
+                            }
+                        }
+                    }
+                    size_t output_index =
+                        ((batch * channels + channel) * out_h + out_y) *
+                            out_w + out_x;
+                    output[output_index] = best;
+                    indices[output_index] = best_index;
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+int uray_max_pool2d_backward(
+    size_t batches, size_t channels, size_t height, size_t width,
+    size_t kernel, size_t stride, const double *grad_output,
+    const size_t *indices, double *grad_input
+) {
+    if (batches == 0 || channels == 0 || height == 0 || width == 0 ||
+        kernel == 0 || stride == 0 || kernel > height || kernel > width ||
+        grad_output == NULL || indices == NULL || grad_input == NULL) {
+        return 1;
+    }
+    size_t out_h = (height - kernel) / stride + 1;
+    size_t out_w = (width - kernel) / stride + 1;
+    size_t input_count, output_count;
+    if (!checked_product(batches, channels, &input_count) ||
+        !checked_product(input_count, height, &input_count) ||
+        !checked_product(input_count, width, &input_count) ||
+        !checked_product(batches, channels, &output_count) ||
+        !checked_product(output_count, out_h, &output_count) ||
+        !checked_product(output_count, out_w, &output_count) ||
+        input_count > SIZE_MAX / sizeof(double) ||
+        output_count > SIZE_MAX / sizeof(double) ||
+        output_count > SIZE_MAX / sizeof(size_t) ||
+        kernel > SIZE_MAX / kernel) {
+        return 1;
+    }
+    memset(grad_input, 0, input_count * sizeof(double));
+    for (size_t batch = 0; batch < batches; ++batch) {
+        for (size_t channel = 0; channel < channels; ++channel) {
+            for (size_t out_y = 0; out_y < out_h; ++out_y) {
+                for (size_t out_x = 0; out_x < out_w; ++out_x) {
+                    size_t output_index =
+                        ((batch * channels + channel) * out_h + out_y) *
+                            out_w + out_x;
+                    size_t best_index = indices[output_index];
+                    if (best_index >= kernel * kernel) return 1;
+                    size_t in_y = out_y * stride + best_index / kernel;
+                    size_t in_x = out_x * stride + best_index % kernel;
+                    size_t input_index =
+                        ((batch * channels + channel) * height + in_y) *
+                            width + in_x;
+                    grad_input[input_index] += grad_output[output_index];
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+void uray_relu_forward(
+    size_t count, const double *input, double *output
+) {
+    if (count == 0 || input == NULL || output == NULL) return;
+    for (size_t index = 0; index < count; ++index) {
+        output[index] = input[index] > 0.0 ? input[index] : 0.0;
+    }
+}
+
+void uray_relu_backward(
+    size_t count, const double *input, const double *grad_output,
+    double *grad_input
+) {
+    if (count == 0 || input == NULL || grad_output == NULL ||
+        grad_input == NULL) {
+        return;
+    }
+    for (size_t index = 0; index < count; ++index) {
+        grad_input[index] = input[index] > 0.0 ? grad_output[index] : 0.0;
+    }
+}
