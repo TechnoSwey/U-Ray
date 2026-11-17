@@ -2,6 +2,7 @@ __pycache__/
 *.pyc
 *.json
 !package.json
+!ML/**/trained_model.json
 examples/data/mnist/
 .pytest_cache/
 .venv/
