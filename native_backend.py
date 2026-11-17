@@ -153,11 +153,24 @@ def _as_matrix(data, name):
     return rows
 
 
-def _flat_array(data, name):
+def _flat_array(data, name, finite_check=None):
     result = array.array("d")
 
     def append_values(value):
         if isinstance(value, (list, tuple)):
+            if not value:
+                return
+            if not isinstance(value[0], (list, tuple)):
+                try:
+                    if isinstance(value, list):
+                        result.fromlist(value)
+                    else:
+                        packed = array.array("d", value)
+                        result.extend(packed)
+                except (TypeError, ValueError, OverflowError):
+                    for item in value:
+                        append_values(item)
+                return
             for item in value:
                 append_values(item)
             return
@@ -170,6 +183,14 @@ def _flat_array(data, name):
         result.append(number)
 
     append_values(data)
+    if finite_check is None:
+        is_finite = all(math.isfinite(number) for number in result)
+    else:
+        is_finite = finite_check(result)
+    if not is_finite:
+        raise RuntimeErrorUray(
+            f"{name}: элементы должны быть конечными"
+        )
     return result
 
 
@@ -209,7 +230,7 @@ def _flat_4d_array(data):
     for sample in data:
         for channel in sample:
             for row in channel:
-                result.extend(row)
+                result.fromlist(row)
     return result
 
 
@@ -440,6 +461,10 @@ class NativeBackend:
         self.library.uray_matmul.restype = None
         self.library.uray_all_finite.argtypes = [_SIZE_T, _VOID_P]
         self.library.uray_all_finite.restype = ctypes.c_int
+        self.library.uray_sum_all.argtypes = [
+            _SIZE_T, _VOID_P, _DOUBLE_P,
+        ]
+        self.library.uray_sum_all.restype = ctypes.c_int
         self.library.uray_mlp_train_epoch.argtypes = [
             _SIZE_T, _VOID_P, _VOID_P, _VOID_P, _VOID_P, ctypes.c_int,
             _INT_P, _SIZE_T, _VOID_P, _VOID_P, _VOID_P, _VOID_P,
@@ -492,6 +517,174 @@ class NativeBackend:
             [_SIZE_T] * 4 + [ctypes.c_int] + [_VOID_P] * 20
         )
         self.library.uray_attention_backward.restype = ctypes.c_int
+        self.library.uray_layer_norm_forward.argtypes = [
+            _SIZE_T, _SIZE_T, _VOID_P, _VOID_P, _VOID_P,
+            ctypes.c_double, _VOID_P, _VOID_P, _VOID_P,
+        ]
+        self.library.uray_layer_norm_forward.restype = ctypes.c_int
+        self.library.uray_layer_norm_backward.argtypes = [
+            _SIZE_T, _SIZE_T, _VOID_P, _VOID_P, _VOID_P, _VOID_P,
+            _VOID_P, _VOID_P, _VOID_P,
+        ]
+        self.library.uray_layer_norm_backward.restype = ctypes.c_int
+
+    def _array_is_finite(self, values):
+        if not values:
+            return True
+        pointer, reference = _array_pointer(values, ctypes.c_double)
+        return bool(
+            self.library.uray_all_finite(len(values), pointer)
+        )
+
+    def _flat_numeric_array(self, data, name):
+        return _flat_array(data, name, self._array_is_finite)
+
+    def sum_all(self, data):
+        """Sum nested tensor data without recursively visiting every scalar."""
+        from tensor import Tensor
+
+        shape = Tensor._shape_list(data)
+        values = array.array("d")
+        if len(shape) == 4:
+            values = _flat_4d_array(data)
+        elif len(shape) == 3:
+            for sample in data:
+                for row in sample:
+                    values.extend(row)
+        elif len(shape) == 2:
+            for row in data:
+                values.extend(row)
+        elif len(shape) == 1:
+            values.extend(data)
+        else:
+            values = self._flat_numeric_array(data, "sum")
+        if not values:
+            return 0.0
+        result = ctypes.c_double()
+        values_pointer, values_ref = _array_pointer(values, ctypes.c_double)
+        status = self.library.uray_sum_all(
+            len(values), values_pointer, ctypes.byref(result)
+        )
+        if status == 0:
+            return result.value
+        try:
+            return math.fsum(values)
+        except (OverflowError, ValueError):
+            return sum(values)
+
+    def full_like(self, data, scalar):
+        """Build independent nested rows filled with one scalar."""
+        from tensor import Tensor
+
+        shape = Tensor._shape_list(data)
+        scalar = float(scalar)
+
+        def build(dimensions):
+            if not dimensions:
+                return scalar
+            if len(dimensions) == 1:
+                return [scalar] * dimensions[0]
+            return [build(dimensions[1:]) for _ in range(dimensions[0])]
+
+        return build(shape)
+
+    def layer_norm_forward(self, data, weight, bias, epsilon):
+        from tensor import Tensor
+
+        shape = Tensor._shape_list(data)
+        if not shape or shape[-1] <= 0:
+            raise RuntimeErrorUray("layer_norm ожидает непустую ось признаков")
+        features = shape[-1]
+        count = math.prod(shape)
+        rows = count // features
+        if rows <= 0:
+            raise RuntimeErrorUray("layer_norm ожидает непустые строки")
+
+        input_values = self._flat_numeric_array(data, "layer_norm input")
+        weight_values = self._flat_numeric_array(weight, "layer_norm weight")
+        bias_values = self._flat_numeric_array(bias, "layer_norm bias")
+        if len(input_values) != count or len(weight_values) != features or len(bias_values) != features:
+            raise RuntimeErrorUray("layer_norm: неверные размерности")
+
+        normalized = array.array("d", [0.0]) * count
+        inverse_std = array.array("d", [0.0]) * rows
+        output = array.array("d", [0.0]) * count
+        input_pointer, input_ref = _array_pointer(input_values, ctypes.c_double)
+        weight_pointer, weight_ref = _array_pointer(weight_values, ctypes.c_double)
+        bias_pointer, bias_ref = _array_pointer(bias_values, ctypes.c_double)
+        normalized_pointer, normalized_ref = _array_pointer(
+            normalized, ctypes.c_double
+        )
+        inverse_pointer, inverse_ref = _array_pointer(
+            inverse_std, ctypes.c_double
+        )
+        output_pointer, output_ref = _array_pointer(output, ctypes.c_double)
+        status = self.library.uray_layer_norm_forward(
+            rows, features, input_pointer, weight_pointer, bias_pointer,
+            float(epsilon), normalized_pointer, inverse_pointer, output_pointer,
+        )
+        if status:
+            raise RuntimeErrorUray(
+                f"Нативная layer_norm завершилась с кодом ошибки {status}"
+            )
+        context = {
+            "shape": shape,
+            "features": features,
+            "normalized": normalized,
+            "inverse_std": inverse_std,
+            "weight": weight_values,
+        }
+        return _nested_from_flat(output, shape), context
+
+    def layer_norm_backward(self, gradient, context):
+        shape = context["shape"]
+        features = context["features"]
+        count = math.prod(shape)
+        rows = count // features
+        gradient_values = self._flat_numeric_array(
+            gradient, "layer_norm gradient"
+        )
+        if len(gradient_values) != count:
+            raise RuntimeErrorUray(
+                "layer_norm: неверная форма градиента"
+            )
+        normalized = context["normalized"]
+        inverse_std = context["inverse_std"]
+        weights = context["weight"]
+        grad_input = array.array("d", [0.0]) * count
+        grad_weight = array.array("d", [0.0]) * features
+        grad_bias = array.array("d", [0.0]) * features
+        gradient_pointer, gradient_ref = _array_pointer(
+            gradient_values, ctypes.c_double
+        )
+        normalized_pointer, normalized_ref = _array_pointer(
+            normalized, ctypes.c_double
+        )
+        inverse_pointer, inverse_ref = _array_pointer(
+            inverse_std, ctypes.c_double
+        )
+        weight_pointer, weight_ref = _array_pointer(weights, ctypes.c_double)
+        input_pointer, input_ref = _array_pointer(grad_input, ctypes.c_double)
+        weight_grad_pointer, weight_grad_ref = _array_pointer(
+            grad_weight, ctypes.c_double
+        )
+        bias_grad_pointer, bias_grad_ref = _array_pointer(
+            grad_bias, ctypes.c_double
+        )
+        status = self.library.uray_layer_norm_backward(
+            rows, features, gradient_pointer, normalized_pointer,
+            inverse_pointer, weight_pointer, input_pointer,
+            weight_grad_pointer, bias_grad_pointer,
+        )
+        if status:
+            raise RuntimeErrorUray(
+                f"Нативный backward layer_norm завершился с кодом ошибки {status}"
+            )
+        return (
+            _nested_from_flat(grad_input, shape),
+            list(grad_weight),
+            list(grad_bias),
+        )
 
     def matmul(self, left, right, validated=False):
         if validated:
@@ -548,12 +741,14 @@ class NativeBackend:
         ):
             raise RuntimeErrorUray("Неверные размерности нативного attention")
 
-        input_values = _flat_array(input_data, "attention input")
+        input_values = self._flat_numeric_array(input_data, "attention input")
         weight_values = [
-            _flat_array(value, "attention weight") for value in weights
+            self._flat_numeric_array(value, "attention weight")
+            for value in weights
         ]
         bias_values = [
-            _flat_array(value, "attention bias") for value in biases
+            self._flat_numeric_array(value, "attention bias")
+            for value in biases
         ]
         output_count = batches * sequence * features
         attention_count = batches * sequence * features
@@ -603,7 +798,9 @@ class NativeBackend:
         heads = context["heads"]
         input_values = context["input"]
         weight_values = context["weights"]
-        gradient_values = _flat_array(gradient, "attention gradient")
+        gradient_values = self._flat_numeric_array(
+            gradient, "attention gradient"
+        )
         input_count = batches * sequence * features
         matrix_count = features * features
         grad_input = array.array("d", [0.0]) * input_count
@@ -667,7 +864,10 @@ class NativeBackend:
             raise RuntimeErrorUray("conv2d: ядро больше входа")
         input_values = _flat_4d_array(x_data)
         weight_values = _flat_4d_array(weight_data)
-        bias_values = _flat_array(bias_data, "conv2d bias") if bias_data is not None else None
+        bias_values = (
+            self._flat_numeric_array(bias_data, "conv2d bias")
+            if bias_data is not None else None
+        )
         im2col = array.array(
             "d", [0.0]
         ) * (batches * out_h * out_w * in_channels * kernel_h * kernel_w)
@@ -743,7 +943,7 @@ class NativeBackend:
         input_values = _flat_4d_array(x_data)
         weight_values = _flat_4d_array(weight_data)
         bias_values = (
-            _flat_array(bias_data, "conv2d bias")
+            self._flat_numeric_array(bias_data, "conv2d bias")
             if bias_data is not None else None
         )
         reduction = in_channels * kernel_h * kernel_w
@@ -968,7 +1168,7 @@ class NativeBackend:
         shape = Tensor._shape_list(data)
         values = (
             _flat_4d_array(data)
-            if len(shape) == 4 else _flat_array(data, "ReLU input")
+            if len(shape) == 4 else self._flat_numeric_array(data, "ReLU input")
         )
         output = array.array("d", [0.0]) * len(values)
         input_pointer, input_ref = _array_pointer(values, ctypes.c_double)
@@ -981,7 +1181,9 @@ class NativeBackend:
         shape = context["shape"]
         values = (
             _flat_4d_array(grad_output)
-            if len(shape) == 4 else _flat_array(grad_output, "ReLU gradient")
+            if len(shape) == 4 else self._flat_numeric_array(
+                grad_output, "ReLU gradient"
+            )
         )
         if len(values) != len(context["input"]):
             raise RuntimeErrorUray("ReLU: градиент имеет неверный размер")

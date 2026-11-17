@@ -15,7 +15,7 @@
   <img src="https://img.shields.io/badge/License-MIT-7C3AED?style=flat-square" alt="MIT License">
 </p>
 
-<a href="#быстрый-старт">Быстрый старт</a> · <a href="#возможности">Возможности</a> · <a href="#примеры">Примеры</a> · <a href="#документация">Документация</a> · <a href="#тесты">Тесты</a>
+<a href="#быстрый-старт">Быстрый старт</a> · <a href="#возможности">Возможности</a> · <a href="#примеры">Примеры</a> · <a href="#документация">Документация</a> · <a href="#бенчмарки">Бенчмарки</a> · <a href="#тесты">Тесты</a>
 
 </div>
 
@@ -164,6 +164,30 @@ print("accuracy:", metrics[1])
 | [ML-модуль](docs/ML.md) | `math`, `linalg`, `nn`, оптимизаторы и рецепты обучения |
 | [Архитектура](docs/ARCHITECTURE.md) | Устройство интерпретатора и точки расширения |
 | [Инструменты](docs/TOOLS.md) | VS Code, REPL, formatter и статическая проверка |
+
+## Бенчмарки
+
+Чтобы сравнить встроенный `native` backend с NumPy на одинаковых входных данных,
+сначала скачай MNIST, затем запусти нужные сценарии:
+
+```bash
+python3 examples/download_mnist.py
+python3 benchmarks/benchmark_conv2d.py
+python3 benchmarks/benchmark_transformer.py
+python3 benchmarks/benchmark_cnn.py --data-dir examples/data/mnist
+python3 benchmarks/benchmark_mnist.py --data-dir examples/data/mnist --epochs 1
+```
+
+NumPy нужен только для контрольных замеров; запуск моделей через
+`--backend=native` от него не зависит. Результаты бенчмарков зависят от
+процессора, компилятора и размера задачи, поэтому замер на одной машине не
+гарантирует такое же ускорение на другой.
+
+Проверки классификации требуют не менее 90% точности на тестовой выборке:
+CNN по умолчанию обучается на 10 000 изображениях за 5 эпох, MLP — на полном
+MNIST за 1 эпоху. Transformer в этом наборе решает задачу регрессии, поэтому
+для него проверяется снижение MSE минимум на 90% относительно начальной
+модели на независимой выборке, а не классификационная accuracy.
 
 ## Тесты
 

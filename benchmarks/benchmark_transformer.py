@@ -32,7 +32,7 @@ def _make_data(samples, sequence, features, seed):
     return inputs, targets
 
 
-def _run(nn, backend, inputs, targets, args):
+def _run(nn, backend, inputs, targets, eval_inputs, eval_targets, args):
     set_backend(backend)
     nn.members["rand_seed"].fn([42])
     model = nn.members["sequential"].fn([[
@@ -42,6 +42,9 @@ def _run(nn, backend, inputs, targets, args):
         nn.members["linear_layer"].fn([args.features, args.features]),
     ]])
     nn.members["rand_seed"].fn([2026])
+    baseline_loss = nn.members["evaluate_layers"].fn([
+        model, eval_inputs, eval_targets, "mse",
+    ])[0]
 
     started = time.perf_counter()
     nn.members["train_layers"].fn([
@@ -52,10 +55,10 @@ def _run(nn, backend, inputs, targets, args):
 
     started = time.perf_counter()
     metrics = nn.members["evaluate_layers"].fn([
-        model, inputs[:args.eval_samples], targets[:args.eval_samples], "mse",
+        model, eval_inputs, eval_targets, "mse",
     ])
     evaluate_seconds = time.perf_counter() - started
-    return train_seconds, evaluate_seconds, metrics[0]
+    return train_seconds, evaluate_seconds, metrics[0], baseline_loss
 
 
 def main():
@@ -67,13 +70,19 @@ def main():
     parser.add_argument("--heads", type=int, default=4)
     parser.add_argument("--hidden-dim", type=int, default=32)
     parser.add_argument("--batch-size", type=int, default=8)
-    parser.add_argument("--epochs", type=int, default=1)
+    parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--iterations", type=int, default=3)
     parser.add_argument(
         "--max-ratio",
         type=float,
         default=1.5,
         help="maximum accepted native/NumPy total-time ratio",
+    )
+    parser.add_argument(
+        "--min-loss-reduction",
+        type=float,
+        default=0.90,
+        help="минимальное снижение held-out MSE относительно начальной модели",
     )
     args = parser.parse_args()
     if (
@@ -85,20 +94,29 @@ def main():
         or args.eval_samples > args.samples
         or args.features % args.heads
         or args.max_ratio <= 0
+        or not 0.0 <= args.min_loss_reduction <= 1.0
     ):
         parser.error("invalid dimensions, counts, or max-ratio")
 
     inputs, targets = _make_data(
         args.samples, args.sequence_length, args.features, 314159
     )
+    eval_inputs, eval_targets = _make_data(
+        args.eval_samples, args.sequence_length, args.features, 271828
+    )
     nn = ModuleRegistry().get("nn")
     results = {}
     try:
         for backend in ("numpy", "native"):
             try:
-                _run(nn, backend, inputs, targets, args)  # warmup
+                _run(
+                    nn, backend, inputs, targets, eval_inputs, eval_targets, args
+                )  # warmup
                 samples = [
-                    _run(nn, backend, inputs, targets, args)
+                    _run(
+                        nn, backend, inputs, targets,
+                        eval_inputs, eval_targets, args,
+                    )
                     for _ in range(args.iterations)
                 ]
             except RuntimeErrorUray as error:
@@ -110,7 +128,8 @@ def main():
                 result[1] for result in samples
             )
             results[backend] = (
-                train_seconds, evaluate_seconds, samples[-1][2]
+                train_seconds, evaluate_seconds,
+                samples[-1][2], samples[-1][3]
             )
     finally:
         set_backend("python")
@@ -120,6 +139,14 @@ def main():
     numpy_total = sum(numpy_result[:2])
     native_total = sum(native_result[:2])
     ratio = native_total / numpy_total
+    numpy_loss_reduction = (
+        1.0 - numpy_result[2] / numpy_result[3]
+        if numpy_result[3] > 0.0 else 0.0
+    )
+    native_loss_reduction = (
+        1.0 - native_result[2] / native_result[3]
+        if native_result[3] > 0.0 else 0.0
+    )
     print(
         f"Transformer: samples={args.samples}, eval={args.eval_samples}, "
         f"sequence={args.sequence_length}, features={args.features}, "
@@ -139,7 +166,15 @@ def main():
         f"evaluation loss NumPy={numpy_result[2]:.8g}, "
         f"native={native_result[2]:.8g}"
     )
-    if ratio <= args.max_ratio:
+    print(
+        f"  held-out MSE reduction: NumPy={numpy_loss_reduction:.1%}, "
+        f"native={native_loss_reduction:.1%} "
+        f"(minimum {args.min_loss_reduction:.1%})"
+    )
+    quality_passed = min(
+        numpy_loss_reduction, native_loss_reduction
+    ) >= args.min_loss_reduction
+    if ratio <= args.max_ratio and quality_passed:
         print("  RESULT: PASS")
         return 0
     print(f"  RESULT: NOT MET (maximum ratio {args.max_ratio:.3f}x)")

@@ -87,9 +87,9 @@ def main():
         action="store_true",
         help="сравнить 60000 train и 10000 test изображений",
     )
-    parser.add_argument("--train-samples", type=int, default=1024)
-    parser.add_argument("--test-samples", type=int, default=1024)
-    parser.add_argument("--epochs", type=int, default=1)
+    parser.add_argument("--train-samples", type=int, default=10000)
+    parser.add_argument("--test-samples", type=int, default=10000)
+    parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument(
         "--max-slowdown-seconds",
@@ -97,12 +97,21 @@ def main():
         default=5.0,
         help="максимальное допустимое отставание native от NumPy",
     )
+    parser.add_argument(
+        "--min-accuracy",
+        type=float,
+        default=0.90,
+        help="минимальная точность на тестовой выборке",
+    )
     args = parser.parse_args()
     if min(args.train_samples, args.test_samples, args.epochs,
-           args.batch_size) <= 0 or args.max_slowdown_seconds < 0:
+           args.batch_size) <= 0 or args.max_slowdown_seconds < 0 or not (
+               0.0 <= args.min_accuracy <= 1.0
+           ):
         parser.error(
             "sizes, epochs, batch-size должны быть > 0, "
-            "max-slowdown-seconds должен быть >= 0"
+            "max-slowdown-seconds должен быть >= 0, "
+            "min-accuracy должен быть в [0, 1]"
         )
 
     data_dir = Path(args.data_dir)
@@ -188,7 +197,15 @@ def main():
         f"  test accuracy: NumPy={numpy_result['metrics'][1]:.5f}, "
         f"native={native_result['metrics'][1]:.5f}"
     )
-    if slowdown <= args.max_slowdown_seconds:
+    accuracy_passed = min(
+        numpy_result["metrics"][1], native_result["metrics"][1]
+    ) >= args.min_accuracy
+    if not accuracy_passed:
+        print(
+            f"  QUALITY: FAIL (minimum accuracy "
+            f"{args.min_accuracy:.2%} not reached)"
+        )
+    if slowdown <= args.max_slowdown_seconds and accuracy_passed:
         print("  RESULT: PASS")
         return 0
     print("  RESULT: NOT MET")

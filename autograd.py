@@ -18,6 +18,8 @@ def _shape(value):
 
 def _map(value, fn):
     if isinstance(value, list):
+        if not value or not isinstance(value[0], list):
+            return [fn(item) for item in value]
         return [_map(item, fn) for item in value]
     return fn(value)
 
@@ -26,6 +28,8 @@ def _zip_map(left, right, fn):
     if isinstance(left, list) and isinstance(right, list):
         if len(left) != len(right):
             raise RuntimeErrorUray("Несовместимые размерности тензоров")
+        if not left or not isinstance(left[0], list):
+            return [fn(a, b) for a, b in zip(left, right)]
         return [_zip_map(a, b, fn) for a, b in zip(left, right)]
     return fn(left, right)
 
@@ -164,7 +168,10 @@ def _flatten(value):
     while pending:
         item = pending.pop()
         if isinstance(item, list):
-            pending.extend(reversed(item))
+            if item and not isinstance(item[0], list):
+                result.extend(item)
+            else:
+                pending.extend(reversed(item))
         else:
             result.append(item)
     return result
@@ -598,7 +605,11 @@ class GradTensor(Tensor):
         return self.reshape([math.prod(self.shape())])
 
     def sum_all(self):
-        data = _sum_data(self.data)
+        native = get_native()
+        data = (
+            native.sum_all(self.data)
+            if native is not None else _sum_data(self.data)
+        )
 
         def backward(grad):
             np = get_numpy()
@@ -608,6 +619,9 @@ class GradTensor(Tensor):
                         np.full_like(np.asarray(self.data, dtype=float), grad)
                     ),
                 )
+            native = get_native()
+            if native is not None:
+                return (native.full_like(self.data, grad),)
             return (_map(self.data, lambda _: grad),)
 
         return self._result(
@@ -1483,6 +1497,19 @@ class GradTensor(Tensor):
 
             return self._result(
                 _array_to_data(output), (self, weight, bias), backward
+            )
+
+        native = get_native()
+        if native is not None:
+            output, context = native.layer_norm_forward(
+                self.data, weight.data, bias.data, float(epsilon)
+            )
+
+            def backward(gradient):
+                return native.layer_norm_backward(gradient, context)
+
+            return self._result_owned(
+                output, (self, weight, bias), backward
             )
 
         flat = _flatten(self.data)

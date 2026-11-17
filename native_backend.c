@@ -19,6 +19,29 @@
 #define URAY_X86_GNU 0
 #endif
 
+int uray_sum_all(size_t count, const double *values, double *result) {
+    if (result == NULL || (count > 0 && values == NULL)) return 1;
+    double total = 0.0;
+    double correction = 0.0;
+    for (size_t index = 0; index < count; ++index) {
+        double value = values[index];
+        if (!isfinite(value)) return 2;
+        double next = total + value;
+        if (!isfinite(next)) return 2;
+        if (fabs(total) >= fabs(value)) {
+            correction += (total - next) + value;
+        } else {
+            correction += (value - next) + total;
+        }
+        if (!isfinite(correction)) return 2;
+        total = next;
+    }
+    double sum = total + correction;
+    if (!isfinite(sum)) return 2;
+    *result = sum;
+    return 0;
+}
+
 static void gemm_scalar(
     size_t m, size_t k, size_t n,
     const double *restrict a,
@@ -1174,6 +1197,87 @@ int uray_attention_backward(
     free(grad_probabilities);
     free(grad_scores);
     free(grad_projected);
+    return 0;
+}
+
+int uray_layer_norm_forward(
+    size_t rows, size_t features,
+    const double *input, const double *weight, const double *bias,
+    double epsilon, double *normalized, double *inverse_std, double *output
+) {
+    if (rows == 0 || features == 0 || features > SIZE_MAX / rows ||
+        rows * features > SIZE_MAX / sizeof(double) ||
+        input == NULL || weight == NULL || bias == NULL ||
+        normalized == NULL || inverse_std == NULL || output == NULL ||
+        !(epsilon > 0.0)) {
+        return 1;
+    }
+
+    for (size_t row = 0; row < rows; ++row) {
+        size_t offset = row * features;
+        double mean = 0.0;
+        for (size_t feature = 0; feature < features; ++feature) {
+            mean += input[offset + feature];
+        }
+        mean /= (double)features;
+
+        double variance = 0.0;
+        for (size_t feature = 0; feature < features; ++feature) {
+            double centered = input[offset + feature] - mean;
+            variance += centered * centered;
+        }
+        variance /= (double)features;
+        double inv_std = 1.0 / sqrt(variance + epsilon);
+        inverse_std[row] = inv_std;
+
+        for (size_t feature = 0; feature < features; ++feature) {
+            size_t index = offset + feature;
+            double value = (input[index] - mean) * inv_std;
+            normalized[index] = value;
+            output[index] = value * weight[feature] + bias[feature];
+        }
+    }
+    return 0;
+}
+
+int uray_layer_norm_backward(
+    size_t rows, size_t features,
+    const double *gradient, const double *normalized,
+    const double *inverse_std, const double *weight,
+    double *grad_input, double *grad_weight, double *grad_bias
+) {
+    if (rows == 0 || features == 0 || features > SIZE_MAX / rows ||
+        rows * features > SIZE_MAX / sizeof(double) ||
+        gradient == NULL || normalized == NULL || inverse_std == NULL ||
+        weight == NULL || grad_input == NULL || grad_weight == NULL ||
+        grad_bias == NULL) {
+        return 1;
+    }
+
+    memset(grad_input, 0, rows * features * sizeof(double));
+    memset(grad_weight, 0, features * sizeof(double));
+    memset(grad_bias, 0, features * sizeof(double));
+    for (size_t row = 0; row < rows; ++row) {
+        size_t offset = row * features;
+        double grad_sum = 0.0;
+        double normalized_grad_sum = 0.0;
+        for (size_t feature = 0; feature < features; ++feature) {
+            size_t index = offset + feature;
+            double grad = gradient[index];
+            grad_sum += grad;
+            normalized_grad_sum += grad * normalized[index];
+            grad_weight[feature] += grad * normalized[index];
+            grad_bias[feature] += grad;
+        }
+        double scale = inverse_std[row] / (double)features;
+        for (size_t feature = 0; feature < features; ++feature) {
+            size_t index = offset + feature;
+            double grad = gradient[index];
+            grad_input[index] = weight[feature] * scale *
+                ((double)features * grad - grad_sum -
+                 normalized[index] * normalized_grad_sum);
+        }
+    }
     return 0;
 }
 
