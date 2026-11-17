@@ -11,6 +11,15 @@ import time
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from _common import (
+    configure_numpy_threads,
+    prepare_backends,
+    print_environment,
+    run_interleaved,
+)
+
+NUMPY_THREADS = configure_numpy_threads()
+
 from errors import RuntimeErrorUray
 from modules import ModuleRegistry
 from tensor import set_backend
@@ -72,6 +81,8 @@ def main():
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--iterations", type=int, default=3)
+    parser.add_argument("--warmups", type=int, default=1)
+    parser.add_argument("--seed", type=int, default=2026)
     parser.add_argument(
         "--max-ratio",
         type=float,
@@ -94,6 +105,7 @@ def main():
         or args.eval_samples > args.samples
         or args.features % args.heads
         or args.max_ratio <= 0
+        or args.warmups < 0
         or not 0.0 <= args.min_loss_reduction <= 1.0
     ):
         parser.error("invalid dimensions, counts, or max-ratio")
@@ -105,37 +117,40 @@ def main():
         args.eval_samples, args.sequence_length, args.features, 271828
     )
     nn = ModuleRegistry().get("nn")
-    results = {}
+    def run_backend(backend):
+        return _run(
+            nn, backend, inputs, targets, eval_inputs, eval_targets, args
+        )
+
     try:
-        for backend in ("numpy", "native"):
-            try:
-                _run(
-                    nn, backend, inputs, targets, eval_inputs, eval_targets, args
-                )  # warmup
-                samples = [
-                    _run(
-                        nn, backend, inputs, targets,
-                        eval_inputs, eval_targets, args,
-                    )
-                    for _ in range(args.iterations)
-                ]
-            except RuntimeErrorUray as error:
-                parser.error(f"{backend} backend недоступен: {error}")
-            train_seconds = statistics.median(
-                result[0] for result in samples
-            )
-            evaluate_seconds = statistics.median(
-                result[1] for result in samples
-            )
-            results[backend] = (
-                train_seconds, evaluate_seconds,
-                samples[-1][2], samples[-1][3]
-            )
+        initialization = prepare_backends(
+            ("numpy", "native"), set_backend, seed=args.seed
+        )
+        results = run_interleaved(
+            ("numpy", "native"),
+            run_backend,
+            iterations=args.iterations,
+            warmups=args.warmups,
+            seed=args.seed,
+            keep_results=True,
+        )
+    except RuntimeErrorUray as error:
+        parser.error(f"backend недоступен: {error}")
     finally:
         set_backend("python")
 
-    numpy_result = results["numpy"]
-    native_result = results["native"]
+    phases = {}
+    for backend, summary in results.items():
+        samples = summary["results"]
+        phases[backend] = (
+            statistics.median(result[0] for result in samples),
+            statistics.median(result[1] for result in samples),
+            samples[-1][2],
+            samples[-1][3],
+        )
+
+    numpy_result = phases["numpy"]
+    native_result = phases["native"]
     numpy_total = sum(numpy_result[:2])
     native_total = sum(native_result[:2])
     ratio = native_total / numpy_total
@@ -147,19 +162,37 @@ def main():
         1.0 - native_result[2] / native_result[3]
         if native_result[3] > 0.0 else 0.0
     )
+    print_environment(
+        numpy_threads=NUMPY_THREADS,
+        seed=args.seed,
+        iterations=args.iterations,
+        warmups=args.warmups,
+    )
+    print(
+        "Backend initialization (excluded from timing): "
+        f"NumPy={initialization['numpy']:.3f}s, "
+        f"native={initialization['native']:.3f}s"
+    )
     print(
         f"Transformer: samples={args.samples}, eval={args.eval_samples}, "
         f"sequence={args.sequence_length}, features={args.features}, "
-        f"heads={args.heads}, batch={args.batch_size}, epochs={args.epochs}, "
-        f"median of {args.iterations} runs after warmup"
+        f"heads={args.heads}, batch={args.batch_size}, epochs={args.epochs}"
     )
     print(
         f"  NumPy:  train={numpy_result[0]:.4f}s, "
-        f"evaluate={numpy_result[1]:.4f}s, total={numpy_total:.4f}s"
+        f"evaluate={numpy_result[1]:.4f}s, total={numpy_total:.4f}s "
+        "(paired medians)"
     )
     print(
         f"  native: train={native_result[0]:.4f}s, "
-        f"evaluate={native_result[1]:.4f}s, total={native_total:.4f}s"
+        f"evaluate={native_result[1]:.4f}s, total={native_total:.4f}s "
+        "(paired medians)"
+    )
+    print(
+        f"  paired trial wall: NumPy={results['numpy']['median']:.4f}s "
+        f"(MAD {results['numpy']['mad']:.4f}s), "
+        f"native={results['native']['median']:.4f}s "
+        f"(MAD {results['native']['mad']:.4f}s)"
     )
     print(
         f"  native/NumPy={ratio:.3f}x; "

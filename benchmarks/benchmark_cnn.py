@@ -4,10 +4,20 @@
 import argparse
 from pathlib import Path
 import sys
+import statistics
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+
+from _common import (
+    configure_numpy_threads,
+    prepare_backends,
+    print_environment,
+    run_interleaved,
+)
+
+NUMPY_THREADS = configure_numpy_threads()
 
 from errors import RuntimeErrorUray
 from mnist import MNISTView
@@ -91,11 +101,14 @@ def main():
     parser.add_argument("--test-samples", type=int, default=10000)
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--batch-size", type=int, default=128)
+    parser.add_argument("--iterations", type=int, default=1)
+    parser.add_argument("--warmups", type=int, default=0)
+    parser.add_argument("--seed", type=int, default=2026)
     parser.add_argument(
-        "--max-slowdown-seconds",
+        "--max-ratio",
         type=float,
-        default=5.0,
-        help="максимальное допустимое отставание native от NumPy",
+        default=1.5,
+        help="максимальное отношение native/NumPy train+evaluate",
     )
     parser.add_argument(
         "--min-accuracy",
@@ -104,13 +117,20 @@ def main():
         help="минимальная точность на тестовой выборке",
     )
     args = parser.parse_args()
-    if min(args.train_samples, args.test_samples, args.epochs,
-           args.batch_size) <= 0 or args.max_slowdown_seconds < 0 or not (
+    if (
+        min(
+            args.train_samples, args.test_samples, args.epochs,
+            args.batch_size, args.iterations,
+        ) <= 0
+        or args.warmups < 0
+        or args.max_ratio <= 0
+        or not (
                0.0 <= args.min_accuracy <= 1.0
-           ):
+        )
+    ):
         parser.error(
-            "sizes, epochs, batch-size должны быть > 0, "
-            "max-slowdown-seconds должен быть >= 0, "
+            "sizes, epochs, batch-size, iterations и max-ratio должны быть > 0; "
+            "warmups должен быть >= 0; "
             "min-accuracy должен быть в [0, 1]"
         )
 
@@ -143,35 +163,58 @@ def main():
         "test": _bounded_split(loaded["test"], test_samples),
     }
 
-    print("Running NumPy CNN train/evaluate...", flush=True)
     try:
-        numpy_result = _run_backend(
-            nn, dataset, "numpy", args.epochs, args.batch_size
+        initialization = prepare_backends(
+            ("numpy", "native"), set_backend, seed=args.seed
+        )
+        results = run_interleaved(
+            ("numpy", "native"),
+            lambda backend: _run_backend(
+                nn, dataset, backend, args.epochs, args.batch_size
+            ),
+            iterations=args.iterations,
+            warmups=args.warmups,
+            seed=args.seed,
+            keep_results=True,
         )
     except RuntimeErrorUray as error:
-        print(
-            f"NumPy baseline недоступен: {error}\n"
-            "Установите NumPy только для контрольного замера.",
-            file=sys.stderr,
-        )
-        return 2
-
-    print("Running native CNN train/evaluate...", flush=True)
-    try:
-        native_result = _run_backend(
-            nn, dataset, "native", args.epochs, args.batch_size
-        )
-    except RuntimeErrorUray as error:
-        print(f"Native backend недоступен: {error}", file=sys.stderr)
+        print(f"Не удалось выполнить оба backend: {error}", file=sys.stderr)
         return 2
     finally:
         set_backend("python")
 
+    def summarize(backend):
+        summary = results[backend]
+        runs = summary["results"]
+        train_seconds = statistics.median(
+            result["train_seconds"] for result in runs
+        )
+        evaluate_seconds = statistics.median(
+            result["evaluate_seconds"] for result in runs
+        )
+        return {
+            "train_seconds": train_seconds,
+            "evaluate_seconds": evaluate_seconds,
+            "total_seconds": train_seconds + evaluate_seconds,
+            "accuracy": statistics.median(
+                result["metrics"][1] for result in runs
+            ),
+        }
+
+    numpy_result = summarize("numpy")
+    native_result = summarize("native")
     ratio = native_result["total_seconds"] / numpy_result["total_seconds"]
-    difference = (
-        native_result["total_seconds"] - numpy_result["total_seconds"]
+    print_environment(
+        numpy_threads=NUMPY_THREADS,
+        seed=args.seed,
+        iterations=args.iterations,
+        warmups=args.warmups,
     )
-    slowdown = max(0.0, difference)
+    print(
+        "Backend initialization (excluded from timing): "
+        f"NumPy={initialization['numpy']:.3f}s, "
+        f"native={initialization['native']:.3f}s"
+    )
     print("MNIST CNN: Conv2D(1, 8, 3) -> ReLU -> MaxPool(2) -> Dense(1568, 10)")
     print(
         f"  samples: train={train_samples}, test={test_samples}, "
@@ -180,32 +223,35 @@ def main():
     print(
         f"  NumPy:  train={numpy_result['train_seconds']:.3f}s, "
         f"evaluate={numpy_result['evaluate_seconds']:.3f}s, "
-        f"total={numpy_result['total_seconds']:.3f}s"
+        f"total={numpy_result['total_seconds']:.3f}s (median)"
     )
     print(
         f"  native: train={native_result['train_seconds']:.3f}s, "
         f"evaluate={native_result['evaluate_seconds']:.3f}s, "
-        f"total={native_result['total_seconds']:.3f}s"
+        f"total={native_result['total_seconds']:.3f}s (median)"
     )
     print(
-        f"  native/NumPy={ratio:.3f}x "
-        f"(native {'slower' if difference > 0 else 'faster'} by "
-        f"{abs(difference):.3f}s; max allowed slowdown "
-        f"{args.max_slowdown_seconds:.3f}s)"
+        f"  paired trial wall: NumPy={results['numpy']['median']:.3f}s "
+        f"(MAD {results['numpy']['mad']:.3f}s), "
+        f"native={results['native']['median']:.3f}s "
+        f"(MAD {results['native']['mad']:.3f}s)"
     )
     print(
-        f"  test accuracy: NumPy={numpy_result['metrics'][1]:.5f}, "
-        f"native={native_result['metrics'][1]:.5f}"
+        f"  native/NumPy={ratio:.3f}x (target <= {args.max_ratio:.3f}x)"
+    )
+    print(
+        f"  test accuracy: NumPy={numpy_result['accuracy']:.5f}, "
+        f"native={native_result['accuracy']:.5f}"
     )
     accuracy_passed = min(
-        numpy_result["metrics"][1], native_result["metrics"][1]
+        numpy_result["accuracy"], native_result["accuracy"]
     ) >= args.min_accuracy
     if not accuracy_passed:
         print(
             f"  QUALITY: FAIL (minimum accuracy "
             f"{args.min_accuracy:.2%} not reached)"
         )
-    if slowdown <= args.max_slowdown_seconds and accuracy_passed:
+    if ratio <= args.max_ratio and accuracy_passed:
         print("  RESULT: PASS")
         return 0
     print("  RESULT: NOT MET")

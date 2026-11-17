@@ -168,27 +168,29 @@ print("accuracy:", metrics[1])
 
 ## Бенчмарки
 
-Чтобы сравнить встроенный `native` backend с NumPy на одинаковых входных данных,
-сначала скачай MNIST, затем запусти нужные сценарии:
+Для честного сравнения `native` backend с NumPy на одной машине запусти набор:
 
 ```bash
-python3 examples/download_mnist.py
+python3 benchmarks/benchmark_matmul.py
 python3 benchmarks/benchmark_conv2d.py
 python3 benchmarks/benchmark_transformer.py
-python3 benchmarks/benchmark_cnn.py --data-dir examples/data/mnist
+python3 examples/download_mnist.py
 python3 benchmarks/benchmark_mnist.py --data-dir examples/data/mnist --epochs 1
+python3 benchmarks/benchmark_cnn.py --data-dir examples/data/mnist
 ```
 
 NumPy нужен только для контрольных замеров; запуск моделей через
-`--backend=native` от него не зависит. Результаты бенчмарков зависят от
-процессора, компилятора и размера задачи, поэтому замер на одной машине не
-гарантирует такое же ускорение на другой.
+`--backend=native` от него не зависит. Замеры прогревают backend, чередуют
+порядок NumPy/native и выводят медиану с разбросом. По умолчанию NumPy
+ограничен одним потоком; результаты зависят от процессора, компилятора и
+размера задачи, поэтому сравнивай запуски на одной машине. Описание сценариев,
+настроек и ограничений — в [`benchmarks/README.md`](benchmarks/README.md).
 
-Проверки классификации требуют не менее 90% точности на тестовой выборке:
-CNN по умолчанию обучается на 10 000 изображениях за 5 эпох, MLP — на полном
-MNIST за 1 эпоху. Transformer в этом наборе решает задачу регрессии, поэтому
-для него проверяется снижение MSE минимум на 90% относительно начальной
-модели на независимой выборке, а не классификационная accuracy.
+Проверки классификации требуют не менее 90% точности на тестовой выборке.
+Transformer решает регрессионную задачу, поэтому для него измеряется снижение
+MSE на независимой выборке, а не accuracy. Бенчмарки не объявляют общий
+«победный» результат: `native/NumPy < 1` означает преимущество native только
+в конкретном измеренном сценарии.
 
 ## Тесты
 
