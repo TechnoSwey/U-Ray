@@ -243,7 +243,12 @@ class Tensor:
                 ) from e
             return Tensor(result.tolist())
         if _backend == "native":
-            return Tensor(_native.matmul(self._data, other._data))
+            # Tensor has already enforced rectangular numeric inputs and
+            # matmul has checked the inner dimensions, so avoid rebuilding
+            # nested lists just to validate them a second time.
+            return Tensor(_native.matmul(
+                self._data, other._data, validated=True
+            ))
         return Tensor(Tensor._matmul(self._data, other._data))
 
     @staticmethod
