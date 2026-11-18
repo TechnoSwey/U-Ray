@@ -378,6 +378,152 @@ static void forward_batch(
     }
 }
 
+static void adam_update_one(
+    double *parameter, const double *gradient,
+    double *first_moment, double *second_moment,
+    double learning_rate, double beta1_correction,
+    double beta2_correction
+) {
+    double grad = *gradient;
+    *first_moment = 0.9 * *first_moment + 0.1 * grad;
+    *second_moment = 0.999 * *second_moment + 0.001 * grad * grad;
+    double mhat = *first_moment / beta1_correction;
+    double vhat = *second_moment / beta2_correction;
+    *parameter -= learning_rate * mhat / (sqrt(vhat) + 1e-8);
+}
+
+#if URAY_X86_GNU
+__attribute__((target("avx512f")))
+static void adam_update_avx512(
+    size_t count, double *parameters, const double *gradients,
+    double *first_moment, double *second_moment,
+    double learning_rate, double beta1_correction,
+    double beta2_correction
+) {
+    const __m512d beta1 = _mm512_set1_pd(0.9);
+    const __m512d one_minus_beta1 = _mm512_set1_pd(0.1);
+    const __m512d beta2 = _mm512_set1_pd(0.999);
+    const __m512d one_minus_beta2 = _mm512_set1_pd(0.001);
+    const __m512d beta1_correct = _mm512_set1_pd(beta1_correction);
+    const __m512d beta2_correct = _mm512_set1_pd(beta2_correction);
+    const __m512d rate = _mm512_set1_pd(learning_rate);
+    const __m512d epsilon = _mm512_set1_pd(1e-8);
+    size_t i = 0;
+    for (; i + 8 <= count; i += 8) {
+        __m512d grad = _mm512_loadu_pd(gradients + i);
+        __m512d first = _mm512_add_pd(
+            _mm512_mul_pd(beta1, _mm512_loadu_pd(first_moment + i)),
+            _mm512_mul_pd(one_minus_beta1, grad)
+        );
+        __m512d second = _mm512_add_pd(
+            _mm512_mul_pd(beta2, _mm512_loadu_pd(second_moment + i)),
+            _mm512_mul_pd(_mm512_mul_pd(one_minus_beta2, grad), grad)
+        );
+        _mm512_storeu_pd(first_moment + i, first);
+        _mm512_storeu_pd(second_moment + i, second);
+        __m512d mhat = _mm512_div_pd(first, beta1_correct);
+        __m512d vhat = _mm512_div_pd(second, beta2_correct);
+        __m512d update = _mm512_div_pd(
+            _mm512_mul_pd(rate, mhat),
+            _mm512_add_pd(_mm512_sqrt_pd(vhat), epsilon)
+        );
+        _mm512_storeu_pd(
+            parameters + i, _mm512_sub_pd(
+                _mm512_loadu_pd(parameters + i), update
+            )
+        );
+    }
+    for (; i < count; ++i) {
+        adam_update_one(
+            parameters + i, gradients + i, first_moment + i,
+            second_moment + i, learning_rate, beta1_correction,
+            beta2_correction
+        );
+    }
+}
+
+__attribute__((target("avx2")))
+static void adam_update_avx2(
+    size_t count, double *parameters, const double *gradients,
+    double *first_moment, double *second_moment,
+    double learning_rate, double beta1_correction,
+    double beta2_correction
+) {
+    const __m256d beta1 = _mm256_set1_pd(0.9);
+    const __m256d one_minus_beta1 = _mm256_set1_pd(0.1);
+    const __m256d beta2 = _mm256_set1_pd(0.999);
+    const __m256d one_minus_beta2 = _mm256_set1_pd(0.001);
+    const __m256d beta1_correct = _mm256_set1_pd(beta1_correction);
+    const __m256d beta2_correct = _mm256_set1_pd(beta2_correction);
+    const __m256d rate = _mm256_set1_pd(learning_rate);
+    const __m256d epsilon = _mm256_set1_pd(1e-8);
+    size_t i = 0;
+    for (; i + 4 <= count; i += 4) {
+        __m256d grad = _mm256_loadu_pd(gradients + i);
+        __m256d first = _mm256_add_pd(
+            _mm256_mul_pd(beta1, _mm256_loadu_pd(first_moment + i)),
+            _mm256_mul_pd(one_minus_beta1, grad)
+        );
+        __m256d second = _mm256_add_pd(
+            _mm256_mul_pd(beta2, _mm256_loadu_pd(second_moment + i)),
+            _mm256_mul_pd(_mm256_mul_pd(one_minus_beta2, grad), grad)
+        );
+        _mm256_storeu_pd(first_moment + i, first);
+        _mm256_storeu_pd(second_moment + i, second);
+        __m256d mhat = _mm256_div_pd(first, beta1_correct);
+        __m256d vhat = _mm256_div_pd(second, beta2_correct);
+        __m256d update = _mm256_div_pd(
+            _mm256_mul_pd(rate, mhat),
+            _mm256_add_pd(_mm256_sqrt_pd(vhat), epsilon)
+        );
+        _mm256_storeu_pd(
+            parameters + i, _mm256_sub_pd(
+                _mm256_loadu_pd(parameters + i), update
+            )
+        );
+    }
+    for (; i < count; ++i) {
+        adam_update_one(
+            parameters + i, gradients + i, first_moment + i,
+            second_moment + i, learning_rate, beta1_correction,
+            beta2_correction
+        );
+    }
+}
+#endif
+
+static void adam_update_parameters(
+    size_t count, double *parameters, const double *gradients,
+    double *first_moment, double *second_moment,
+    double learning_rate, double beta1_correction,
+    double beta2_correction
+) {
+#if URAY_X86_GNU
+    __builtin_cpu_init();
+    if (__builtin_cpu_supports("avx512f")) {
+        adam_update_avx512(
+            count, parameters, gradients, first_moment, second_moment,
+            learning_rate, beta1_correction, beta2_correction
+        );
+        return;
+    }
+    if (__builtin_cpu_supports("avx2")) {
+        adam_update_avx2(
+            count, parameters, gradients, first_moment, second_moment,
+            learning_rate, beta1_correction, beta2_correction
+        );
+        return;
+    }
+#endif
+    for (size_t i = 0; i < count; ++i) {
+        adam_update_one(
+            parameters + i, gradients + i, first_moment + i,
+            second_moment + i, learning_rate, beta1_correction,
+            beta2_correction
+        );
+    }
+}
+
 int uray_mlp_train_epoch(
     size_t sample_count, const double *x, const double *y,
     const unsigned char *mnist_images, const unsigned char *mnist_labels,
@@ -604,34 +750,33 @@ int uray_mlp_train_epoch(
             beta2_correction = 1.0 - pow(0.999, (double)*step);
         }
 
-        for (size_t i = 0; i < total_weights; ++i) {
-            double grad = grad_weights[i];
-            if (optimizer == 2) {
-                state_mw[i] = 0.9 * state_mw[i] + 0.1 * grad;
-                state_vw[i] = 0.999 * state_vw[i] + 0.001 * grad * grad;
-                double mhat = state_mw[i] / beta1_correction;
-                double vhat = state_vw[i] / beta2_correction;
-                weights[i] -= learning_rate * mhat / (sqrt(vhat) + 1e-8);
-            } else if (optimizer == 1) {
-                state_mw[i] = 0.9 * state_mw[i] - learning_rate * grad;
-                weights[i] += state_mw[i];
-            } else {
-                weights[i] -= learning_rate * grad;
+        if (optimizer == 2) {
+            adam_update_parameters(
+                total_weights, weights, grad_weights, state_mw, state_vw,
+                learning_rate, beta1_correction, beta2_correction
+            );
+            adam_update_parameters(
+                total_biases, biases, grad_biases, state_mb, state_vb,
+                learning_rate, beta1_correction, beta2_correction
+            );
+        } else {
+            for (size_t i = 0; i < total_weights; ++i) {
+                double grad = grad_weights[i];
+                if (optimizer == 1) {
+                    state_mw[i] = 0.9 * state_mw[i] - learning_rate * grad;
+                    weights[i] += state_mw[i];
+                } else {
+                    weights[i] -= learning_rate * grad;
+                }
             }
-        }
-        for (size_t i = 0; i < total_biases; ++i) {
-            double grad = grad_biases[i];
-            if (optimizer == 2) {
-                state_mb[i] = 0.9 * state_mb[i] + 0.1 * grad;
-                state_vb[i] = 0.999 * state_vb[i] + 0.001 * grad * grad;
-                double mhat = state_mb[i] / beta1_correction;
-                double vhat = state_vb[i] / beta2_correction;
-                biases[i] -= learning_rate * mhat / (sqrt(vhat) + 1e-8);
-            } else if (optimizer == 1) {
-                state_mb[i] = 0.9 * state_mb[i] - learning_rate * grad;
-                biases[i] += state_mb[i];
-            } else {
-                biases[i] -= learning_rate * grad;
+            for (size_t i = 0; i < total_biases; ++i) {
+                double grad = grad_biases[i];
+                if (optimizer == 1) {
+                    state_mb[i] = 0.9 * state_mb[i] - learning_rate * grad;
+                    biases[i] += state_mb[i];
+                } else {
+                    biases[i] -= learning_rate * grad;
+                }
             }
         }
     }
