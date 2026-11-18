@@ -52,6 +52,13 @@ class Tensor:
     def __init__(self, data):
         self._data = self._to_float_list(data)
 
+    @classmethod
+    def _from_native_data(cls, data):
+        """Wrap a result produced by U-Ray's native kernels without recasting it."""
+        tensor = cls.__new__(cls)
+        tensor._data = data
+        return tensor
+
     @staticmethod
     def _to_float_list(data):
         if isinstance(data, list):
@@ -246,7 +253,7 @@ class Tensor:
             # Tensor has already enforced rectangular numeric inputs and
             # matmul has checked the inner dimensions, so avoid rebuilding
             # nested lists just to validate them a second time.
-            return Tensor(_native.matmul(
+            return Tensor._from_native_data(_native.matmul(
                 self._data, other._data, validated=True
             ))
         return Tensor(Tensor._matmul(self._data, other._data))
