@@ -1,6 +1,7 @@
 # interpreter.py
 
 import os
+import time
 
 from errors import RuntimeErrorUray, URayError
 from values import (
@@ -70,6 +71,7 @@ class Interpreter:
         self.env = self.globals
         self.registry = ModuleRegistry()
         self.loaded_files = loaded_files if loaded_files is not None else set()
+        self.profiler = None
 
         self.globals.set("len", Builtin("len", self._builtin_len))
         self.globals.set("push", Builtin("push", self._builtin_push))
@@ -635,6 +637,7 @@ class Interpreter:
         from typechecker import StaticChecker
         StaticChecker().check(program)
         sub = Interpreter(loaded_files=self.loaded_files | {full})
+        sub.profiler = self.profiler
         sub.run(program)
         for name, val in sub.globals.vars.items():
             if not isinstance(val, Builtin):
@@ -867,6 +870,21 @@ class Interpreter:
         args = [self.eval_expr(a) for a in node.args]
 
         if isinstance(callee, Builtin):
+            call_name = self._profile_call_name(node.callee)
+            if self.profiler is not None and call_name.startswith("nn."):
+                started = time.perf_counter_ns()
+                try:
+                    result = callee.fn(args)
+                except BaseException:
+                    self.profiler.record(
+                        call_name, time.perf_counter_ns() - started,
+                        args, failed=True,
+                    )
+                    raise
+                self.profiler.record(
+                    call_name, time.perf_counter_ns() - started, args, result
+                )
+                return result
             return callee.fn(args)
 
         if isinstance(callee, LambdaFunc):
@@ -932,6 +950,15 @@ class Interpreter:
         finally:
             self.env = saved_env
         return result
+
+    @staticmethod
+    def _profile_call_name(node):
+        if isinstance(node, Var):
+            return node.name
+        if isinstance(node, Attr):
+            parent = Interpreter._profile_call_name(node.target)
+            return f"{parent}.{node.name}" if parent else ""
+        return ""
 
 
 def run(program):

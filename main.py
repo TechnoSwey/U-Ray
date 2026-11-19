@@ -1,8 +1,11 @@
 # main.py
 
 import argparse
+import contextlib
+import io
 import os
 import sys
+import time
 from pathlib import Path
 
 import values
@@ -134,7 +137,8 @@ def _build_argument_parser():
             "Без файла запускается интерактивный режим. Встроенное "
             "нативное ядро ускоряет MLP без NumPy при --backend=native; "
             "--backend=numpy доступен как дополнительный backend. "
-            "Команды: uray fmt FILE, uray check FILE."
+            "Команды: uray fmt FILE, uray check FILE, uray profile FILE, "
+            ""
         ),
     )
     parser.add_argument(
@@ -225,12 +229,75 @@ def _check_command(argv):
     return 0
 
 
+def _profile_command(argv):
+    from profiler import MLProfiler
+
+    parser = argparse.ArgumentParser(
+        prog="uray profile",
+        description="Запускает файл U-Ray и измеряет вызовы nn.*.",
+    )
+    parser.add_argument("file", help="путь к .ur файлу")
+    parser.add_argument(
+        "--backend",
+        choices=("python", "native", "numpy"),
+        default="python",
+        help="backend тензорных и пакетных ML-операций",
+    )
+    parser.add_argument(
+        "--format",
+        choices=("text", "json"),
+        default="text",
+        help="формат отчёта (по умолчанию: text)",
+    )
+    args = parser.parse_args(argv)
+    path = Path(args.file)
+    try:
+        set_backend(args.backend)
+        active_backend = args.backend
+        source = path.read_text(encoding="utf-8")
+        program = parse(source)
+        StaticChecker().check(program)
+    except (OSError, URayError) as error:
+        print(f"uray profile: {error}", file=sys.stderr)
+        return 1
+
+    values.URAY_BASE_DIR = str(path.resolve().parent)
+    profiler = MLProfiler()
+    interpreter = Interpreter()
+    interpreter.profiler = profiler
+    started = time.perf_counter_ns()
+    status = 0
+    program_output = None
+    output_capture = io.StringIO() if args.format == "json" else None
+    output_context = (
+        contextlib.redirect_stdout(output_capture)
+        if output_capture is not None else contextlib.nullcontext()
+    )
+    with output_context:
+        try:
+            interpreter.run(program)
+        except URayError as error:
+            print(f"{path}: ошибка U-Ray: {error}", file=sys.stderr)
+            status = 1
+    if output_capture is not None:
+        program_output = output_capture.getvalue()
+    runtime_ns = time.perf_counter_ns() - started
+    report = profiler.report(active_backend, runtime_ns, program_output)
+    if args.format == "json":
+        print(profiler.format_json(report))
+    else:
+        print(profiler.format_text(report))
+    return status
+
+
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv and argv[0] == "fmt":
         return _format_command(argv[1:])
     if argv and argv[0] == "check":
         return _check_command(argv[1:])
+    if argv and argv[0] == "profile":
+        return _profile_command(argv[1:])
     parser = _build_argument_parser()
     args = parser.parse_args(argv)
     if args.repl and args.file:

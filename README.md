@@ -64,6 +64,7 @@ python3 main.py examples/save_load.ur
 ./uray examples/mnist_cnn.ur --backend=native
 ./uray examples/tabular_classification.ur
 ./uray check examples/mlp_xor.ur
+./uray profile examples/transformer_sequence.ur --backend=native
 ./uray fmt examples/mlp_xor.ur
 ./uray fmt --write examples/mlp_xor.ur
 ```
@@ -99,6 +100,8 @@ max-pooling в CNN/autodiff-моделях. Он не импортирует Num
 `uray fmt --write file.ur`, а `uray fmt --check file.ur` подходит для CI.
 Перед выполнением файла U-Ray проверяет известные размерности. Команда
 `uray check file.ur` запускает эту проверку без исполнения программы.
+`uray profile file.ur --backend=native` запускает программу и выводит время
+вызовов `nn.*`; `--format=json` выдаёт те же данные для автоматической обработки.
 
 Расширение VS Code доступно локально в
 [`vscode/uray-language`](vscode/uray-language/README.md); публикации в

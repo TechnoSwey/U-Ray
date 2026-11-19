@@ -88,7 +88,8 @@ help_output="$("$URAY_DIR/uray" --help 2>&1)"
 if [[ "$help_output" == *"--backend"* \
     && "$help_output" == *"--repl"* \
     && "$help_output" == *"uray fmt"* \
-    && "$help_output" == *"uray check"* ]]; then
+    && "$help_output" == *"uray check"* \
+    && "$help_output" == *"uray profile"* ]]; then
     echo "PASS cli_help"
     PASS=$((PASS + 1))
 else
